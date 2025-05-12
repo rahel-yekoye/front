@@ -1,0 +1,32 @@
+name: chat_app_flutter
+description: "A new Flutter project."
+
+publish_to: 'none'
+
+version: 1.0.0+1
+
+environment:
+  sdk: ^3.6.2
+
+dependencies:
+  flutter:
+    sdk: flutter
+  uuid: ^3.0.6
+  http: ^1.2.0
+  socket_io_client: ^2.0.3+1
+  cupertino_icons: ^1.0.8
+  file_picker: ^6.1.1
+  emoji_picker_flutter: ^1.6.2
+  lottie: ^2.2.0
+  intl: ^0.18.0
+
+  google_sign_in: ^6.1.0
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^5.0.0
+
+flutter:
+  uses-material-design: true
+
