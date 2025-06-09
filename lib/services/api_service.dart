@@ -1,12 +1,12 @@
 import 'dart:convert';
 import 'package:http/http.dart' as http;
-import '../models/message.dart'; // Import Message model
+import '../models/message.dart'; 
 
 
 class ApiService {
-  static const String baseUrl = 'http://127.0.0.1:4000'; // ⚠️ Note: use 10.0.2.2 for Android Emulator
+  static const String baseUrl = 'http://127.0.0.1:4000'; 
 
-  // Send a message
+
   static Future<bool> sendMessage(String sender, String receiver, String content) async {
     final url = Uri.parse('$baseUrl/messages');
 
@@ -29,7 +29,7 @@ class ApiService {
     }
   }
 
-  // Fetch messages between two users
+ 
   static Future<List<Message>> getMessages(String sender, String receiver) async {
     final url = Uri.parse('$baseUrl/messages?sender=$sender&receiver=$receiver');
 
@@ -37,11 +37,11 @@ class ApiService {
 
     if (response.statusCode == 200) {
       final data = jsonDecode(response.body);
-      print('Fetched messages: $data'); // Debug log
+      print('Fetched messages: $data');
 
       List<Message> messages = (data['data'] as List)
           .map((msgJson) {
-            print('Processing message: $msgJson'); // Debug log
+            print('Processing message: $msgJson'); 
             return Message.fromJson(msgJson);
           })
           .toList();
@@ -52,7 +52,6 @@ class ApiService {
     }
   }
 
-  // Fetch group IDs for the current user
   static Future<List<String>> fetchGroupIds(String jwtToken) async {
     final url = Uri.parse('$baseUrl/groups');
 
@@ -63,7 +62,6 @@ class ApiService {
 
     if (response.statusCode == 200) {
       final List<dynamic> data = jsonDecode(response.body);
-      // Extract group IDs from the response
       return data.map((group) => group['_id'].toString()).toList();
     } else {
       print('❌ Failed to fetch group IDs: ${response.statusCode}');

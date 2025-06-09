@@ -1,7 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:http/http.dart' as http;
 import 'dart:convert';
-import 'welcome_screen.dart'; // Import the WelcomeScreen
+import 'inbox_screen.dart';
 
 class VerificationScreen extends StatefulWidget {
   final String email;
@@ -39,17 +39,17 @@ class _VerificationScreenState extends State<VerificationScreen> {
       );
 
       if (response.statusCode == 201) {
-        setState(() => isLoading = false);
+        final data = jsonDecode(response.body);
+        final String jwtToken = data['token'];
+        final String userId = data['user']['id']; // Make sure your backend sends this!
 
-        // Show success animation
-        showSuccessDialog(context);
-
-        // Navigate to the Welcome Screen after 2 seconds
-        await Future.delayed(const Duration(seconds: 2));
         Navigator.pushReplacement(
           context,
           MaterialPageRoute(
-            builder: (context) => WelcomeScreen(email: widget.email),
+            builder: (context) => InboxScreen(
+              currentUser: userId,
+              jwtToken: jwtToken,
+            ),
           ),
         );
       } else if (response.statusCode == 400) {
@@ -116,24 +116,4 @@ class _VerificationScreenState extends State<VerificationScreen> {
       ),
     );
   }
-}
-
-void showSuccessDialog(BuildContext context) {
-  showDialog(
-    context: context,
-    builder: (BuildContext context) {
-      return AlertDialog(
-        title: const Text('Success'),
-        content: const Text('Verification successful!'),
-        actions: [
-          TextButton(
-            onPressed: () {
-              Navigator.of(context).pop();
-            },
-            child: const Text('OK'),
-          ),
-        ],
-      );
-    },
-  );
 }

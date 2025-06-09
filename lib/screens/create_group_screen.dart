@@ -2,9 +2,10 @@ import 'package:flutter/material.dart';
 import 'package:http/http.dart' as http;
 import 'dart:convert';
 import 'group_chat_screen.dart';
+import 'create_group_page.dart';
 
 class CreateGroupScreen extends StatefulWidget {
-  final String currentUser;
+  final String currentUser; // This should be the user ID
   final String jwtToken;
 
   const CreateGroupScreen({
@@ -19,8 +20,7 @@ class CreateGroupScreen extends StatefulWidget {
 
 class _CreateGroupScreenState extends State<CreateGroupScreen> {
   final TextEditingController _groupNameController = TextEditingController();
-  final TextEditingController _groupDescriptionController =
-      TextEditingController();
+  final TextEditingController _groupDescriptionController = TextEditingController();
   List<Map<String, dynamic>> users = [];
   List<Map<String, dynamic>> groups = [];
   List<String> selectedUsers = [];
@@ -54,36 +54,44 @@ class _CreateGroupScreenState extends State<CreateGroupScreen> {
     }
   }
 
-Future<void> _fetchGroups() async {
-  final url = Uri.parse('http://localhost:4000/groups');
-  try {
-    final response = await http.get(
-      url,
-      headers: {'Authorization': 'Bearer ${widget.jwtToken}'},
-    );
-    if (response.statusCode == 200) {
-      final List<dynamic> data = jsonDecode(response.body);
-      setState(() {
-        groups = data.map((group) => {
-          'id': group['_id'],
-          'name': group['name'],
-          'members': group['members'],
-        }).toList();
-      });
-      print('Fetched groups: $groups'); // Debug the fetched groups
-    } else {
-      print('Failed to fetch groups: ${response.statusCode}');
+  Future<void> _fetchGroups() async {
+    final url = Uri.parse('http://localhost:4000/groups');
+    try {
+      final response = await http.get(
+        url,
+        headers: {'Authorization': 'Bearer ${widget.jwtToken}'},
+      );
+      if (response.statusCode == 200) {
+        final List<dynamic> data = jsonDecode(response.body);
+        setState(() {
+          groups = data.map((group) => {
+            'id': group['_id'],
+            'name': group['name'],
+            'description': group['description'],
+            'members': group['members'],
+            'adminUsername': group['adminUsername'] ?? '', // for display
+          }).toList();
+        });
+        print('Fetched groups: $groups');
+      } else {
+        print('Failed to fetch groups: ${response.statusCode}');
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Failed to fetch groups: ${response.statusCode}')),
+        );
+      }
+    } catch (error) {
+      print('Error fetching groups: $error');
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Failed to fetch groups: ${response.statusCode}')),
+        const SnackBar(content: Text('An error occurred while fetching groups')),
       );
     }
-  } catch (error) {
-    print('Error fetching groups: $error');
-    ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(content: Text('An error occurred while fetching groups')),
-    );
   }
-}
+
+  // Helper to get username by user ID
+  String getUsernameById(String id) {
+    final user = users.firstWhere((u) => u['_id'] == id, orElse: () => {});
+    return user.isNotEmpty ? user['username'] ?? 'Unknown' : 'Unknown';
+  }
 
   Future<void> _createGroup() async {
     final groupName = _groupNameController.text.trim();
@@ -111,7 +119,8 @@ Future<void> _fetchGroups() async {
         body: jsonEncode({
           'name': groupName,
           'description': groupDescription,
-          'members': selectedUsers,
+          'members': selectedUsers, // list of user IDs
+          'memberUsernames': selectedUsers.map((id) => getUsernameById(id)).toList(), // for display
         }),
       );
 
@@ -119,7 +128,7 @@ Future<void> _fetchGroups() async {
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(content: Text('Group created successfully')),
         );
-        _fetchGroups(); // Refresh the group list
+        _fetchGroups();
       } else {
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(content: Text('Failed to create group')),
@@ -136,82 +145,26 @@ Future<void> _fetchGroups() async {
     }
   }
 
-  void _showCreateGroupDialog() {
-    showDialog(
-      context: context,
-      builder: (context) {
-        return StatefulBuilder(
-          builder: (context, setState) {
-            return AlertDialog(
-              title: const Text('Create Group'),
-              content: SingleChildScrollView(
-                child: Column(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    TextField(
-                      controller: _groupNameController,
-                      decoration: const InputDecoration(
-                        labelText: 'Group Name',
-                        border: OutlineInputBorder(),
-                      ),
-                    ),
-                    const SizedBox(height: 10),
-                    TextField(
-                      controller: _groupDescriptionController,
-                      decoration: const InputDecoration(
-                        labelText: 'Group Description (Optional)',
-                        border: OutlineInputBorder(),
-                      ),
-                    ),
-                    const SizedBox(height: 10),
-                    const Text(
-                      'Select Members',
-                      style: TextStyle(fontWeight: FontWeight.bold),
-                    ),
-                    const SizedBox(height: 10),
-                    ListView.builder(
-                      shrinkWrap: true,
-                      itemCount: users.length,
-                      itemBuilder: (context, index) {
-                        final user = users[index];
-                        final isSelected = selectedUsers.contains(user['_id']);
-                        return CheckboxListTile(
-                          title: Text(user['username']),
-                          value: isSelected,
-                          onChanged: (bool? value) {
-                            setState(() {
-                              if (value == true) {
-                                selectedUsers.add(user['_id']);
-                              } else {
-                                selectedUsers.remove(user['_id']);
-                              }
-                            });
-                          },
-                        );
-                      },
-                    ),
-                  ],
-                ),
-              ),
-            actions: [
-              TextButton(
-                onPressed: () => Navigator.pop(context),
-                child: const Text('Cancel'),
-              ),
-              ElevatedButton(
-                onPressed: () {
-                  Navigator.pop(context);
-                  _createGroup();
-                },
-                child: const Text('Create'),
-              ),
-            ],
-          );
-        },
+  Future<String> _fetchLastGroupMessage(String groupId) async {
+    final url = Uri.parse('http://localhost:4000/groups/$groupId/last-message');
+    try {
+      final response = await http.get(
+        url,
+        headers: {'Authorization': 'Bearer ${widget.jwtToken}'},
       );
-    },
-  );
-}
+      if (response.statusCode == 200) {
+        final List<dynamic> data = jsonDecode(response.body);
+        if (data.isNotEmpty) {
+          final lastMsg = data.last;
+          final sender = lastMsg['sender']?.toString() ?? 'Unknown';
+          final content = lastMsg['content']?.toString() ?? '';
+          if (content.isEmpty) return 'No messages yet.';
+          return '$sender: $content';
+        }
+      }
+    } catch (_) {}
+    return 'No messages yet.';
+  }
 
   @override
   void dispose() {
@@ -228,43 +181,89 @@ Future<void> _fetchGroups() async {
         actions: [
           IconButton(
             icon: const Icon(Icons.add),
-            onPressed: () => _showCreateGroupDialog(),
+            onPressed: () async {
+              await Navigator.push(
+                context,
+                MaterialPageRoute(
+                  builder: (context) => CreateGroupPage(
+                    users: users,
+                    onCreate: (name, desc, members) {
+                      _groupNameController.text = name;
+                      _groupDescriptionController.text = desc;
+                      selectedUsers = members;
+                      _createGroup();
+                    },
+                  ),
+                ),
+              );
+            },
           ),
         ],
       ),
-      body: groups.isEmpty
-          ? const Center(
-              child: Text(
-                'No groups found. Create a new group!',
-                style: TextStyle(color: Colors.grey),
-              ),
-            )
-          : ListView.builder(
-              itemCount: groups.length,
-              itemBuilder: (context, index) {
-                final group = groups[index];
-                return ListTile(
-                  title: Text(group['name']),
-                  subtitle: Text('Members: ${group['members'].length}'),
-                  onTap: () {
-                    // Navigate to the group chat screen
-                    Navigator.push(
-                      context,
-                      MaterialPageRoute(
-                        builder: (context) => GroupChatScreen(
-                          groupId: group['id'],
-                          groupName: group['name'],
-                          currentUser: widget.currentUser,
-                          jwtToken: widget.jwtToken,
-                        ),
-                      ),
+      body: isLoading
+          ? const Center(child: CircularProgressIndicator())
+          : groups.isEmpty
+              ? const Center(
+                  child: Text(
+                    'No groups found. Create a new group!',
+                    style: TextStyle(color: Colors.grey),
+                  ),
+                )
+              : ListView.builder(
+                  itemCount: groups.length,
+                  itemBuilder: (context, index) {
+                    final group = groups[index];
+                    return FutureBuilder<String>(
+                      future: _fetchLastGroupMessage(group['id']),
+                      builder: (context, snapshot) {
+                        final lastMessage = snapshot.connectionState == ConnectionState.done
+                            ? (snapshot.data ?? 'No messages yet.')
+                            : 'Loading...';
+                        return ListTile(
+                          leading: const Icon(Icons.group, size: 36),
+                          title: Text(group['name']),
+                          subtitle: Text(
+                            lastMessage,
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: const TextStyle(color: Colors.grey),
+                          ),
+                          onTap: () {
+                            Navigator.push(
+                              context,
+                              MaterialPageRoute(
+                                builder: (context) => GroupChatScreen(
+                                  groupId: group['id'],
+                                  groupName: group['name'],
+                                  groupDescription: group['description'] ?? '',
+                                  currentUser: widget.currentUser,
+                                  jwtToken: widget.jwtToken,
+                                ),
+                              ),
+                            );
+                          },
+                        );
+                      },
                     );
                   },
-                );
-              },
-            ),
+                ),
       floatingActionButton: FloatingActionButton(
-        onPressed: _showCreateGroupDialog,
+        onPressed: () async {
+          await Navigator.push(
+            context,
+            MaterialPageRoute(
+              builder: (context) => CreateGroupPage(
+                users: users,
+                onCreate: (name, desc, members) {
+                  _groupNameController.text = name;
+                  _groupDescriptionController.text = desc;
+                  selectedUsers = members;
+                  _createGroup();
+                },
+              ),
+            ),
+          );
+        },
         child: const Icon(Icons.add),
       ),
     );

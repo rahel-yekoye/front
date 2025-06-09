@@ -5,7 +5,7 @@ import 'package:socket_io_client/socket_io_client.dart' as IO;
 import 'chat_screen.dart';
 import 'create_group_screen.dart';
 import 'group_chat_screen.dart';
-import 'search_user_screen.dart'; // Import the SearchScreen
+import 'search_user_screen.dart';
 
 class InboxScreen extends StatefulWidget {
   final String currentUser;
@@ -32,7 +32,7 @@ class _InboxScreenState extends State<InboxScreen>
     _tabController = TabController(length: 2, vsync: this);
     _fetchConversations();
     _fetchGroups();
-    _connectToSocket(); // Ensure this is called early
+    _connectToSocket();
   }
 
   Future<void> _fetchConversations() async {
@@ -69,9 +69,29 @@ class _InboxScreenState extends State<InboxScreen>
           groups = data.map((json) => Map<String, dynamic>.from(json)).toList();
         });
       }
-    } catch (_) {
-      // Handle errors (e.g., show a message)
+    } catch (_) {}
+  }
+
+  Future<String> _fetchLastGroupMessage(String groupId) async {
+    final url = Uri.parse('http://localhost:4000/groups/$groupId/last-message');
+    try {
+      final response = await http.get(
+        url,
+        headers: {'Authorization': 'Bearer ${widget.jwtToken}'},
+      );
+      if (response.statusCode == 200) {
+        final data = jsonDecode(response.body);
+        if (data != null && data is Map) {
+          final sender = data['sender']?.toString() ?? 'Unknown';
+          final content = data['content']?.toString() ?? '';
+          if (content.isEmpty) return 'No messages yet.';
+          return '$sender: $content';
+        }
+      }
+    } catch (e) {
+      print('Error fetching last group message: $e');
     }
+    return 'No messages yet.';
   }
 
   void _connectToSocket() {
@@ -88,13 +108,11 @@ class _InboxScreenState extends State<InboxScreen>
       print('❌ Disconnected from Socket.IO server');
     });
 
-    // Listen for conversation updates (only for direct messages)
     socket.on('conversation_update', (data) {
       final updated = Map<String, dynamic>.from(data);
 
-      // Ensure this is not a group message
       if (updated['isGroup'] == true) {
-        return; // Ignore group messages
+        return;
       }
 
       setState(() {
@@ -147,16 +165,16 @@ class _InboxScreenState extends State<InboxScreen>
                 context,
                 MaterialPageRoute(
                   builder: (context) => SearchScreen(
-                    loggedInUser: widget.currentUser, // Pass the currentUser as loggedInUser
+                    loggedInUser: widget.currentUser,
                     jwtToken: widget.jwtToken,
                   ),
                 ),
               );
             },
-            child: const Icon(Icons.search), // Search icon
             tooltip: 'Search User',
+            child: const Icon(Icons.search),
           ),
-          const SizedBox(height: 10), // Space between buttons
+          const SizedBox(height: 10),
           FloatingActionButton(
             heroTag: 'createGroup',
             onPressed: () {
@@ -170,8 +188,8 @@ class _InboxScreenState extends State<InboxScreen>
                 ),
               );
             },
-            child: const Icon(Icons.group_add), // Group add icon
             tooltip: 'Create Group',
+            child: const Icon(Icons.group_add),
           ),
         ],
       ),
@@ -189,9 +207,8 @@ class _InboxScreenState extends State<InboxScreen>
                 itemBuilder: (context, index) {
                   final c = conversations[index];
 
-                  // Ensure this is not a group message
                   if (c['isGroup'] == true) {
-                    return const SizedBox.shrink(); // Skip group messages
+                    return const SizedBox.shrink();
                   }
 
                   return ListTile(
@@ -227,22 +244,35 @@ class _InboxScreenState extends State<InboxScreen>
             separatorBuilder: (_, __) => const Divider(height: 1),
             itemBuilder: (context, index) {
               final group = groups[index];
-              return ListTile(
-                leading: const CircleAvatar(child: Icon(Icons.group)),
-                title: Text(group['name'],
-                    style: const TextStyle(fontWeight: FontWeight.w600)),
-                subtitle: Text(group['description'] ?? 'No description'),
-                onTap: () {
-                  Navigator.push(
-                    context,
-                    MaterialPageRoute(
-                      builder: (context) => GroupChatScreen(
-                        groupId: group['_id'],
-                        groupName: group['name'],
-                        currentUser: widget.currentUser,
-                        jwtToken: widget.jwtToken,
-                      ),
+              return FutureBuilder<String>(
+                future: _fetchLastGroupMessage(group['_id']),
+                builder: (context, snapshot) {
+                  final lastMessage = snapshot.connectionState == ConnectionState.done
+                      ? (snapshot.data ?? 'No messages yet.')
+                      : 'Loading...';
+                  return ListTile(
+                    leading: const CircleAvatar(child: Icon(Icons.group)),
+                    title: Text(group['name'],
+                        style: const TextStyle(fontWeight: FontWeight.w600)),
+                    subtitle: Text(
+                      lastMessage,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
                     ),
+                    onTap: () {
+                      Navigator.push(
+                        context,
+                        MaterialPageRoute(
+                          builder: (context) => GroupChatScreen(
+                            groupId: group['_id'],
+                            groupName: group['name'],
+                            groupDescription: group['description'] ?? '',
+                            currentUser: widget.currentUser,
+                            jwtToken: widget.jwtToken,
+                          ),
+                        ),
+                      );
+                    },
                   );
                 },
               );

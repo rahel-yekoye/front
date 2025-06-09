@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:http/http.dart' as http;
 import 'dart:convert';
 import 'inbox_screen.dart';
+import 'package:chat_app_flutter/services/socket_service.dart'; // Import the socket service
 
 class LoginScreen extends StatefulWidget {
   const LoginScreen({super.key});
@@ -38,6 +39,10 @@ class _LoginScreenState extends State<LoginScreen> {
         final String jwtToken = data['token'];
         final String loggedInUser = data['user']['username'];
 
+        // ✅ Connect to socket after login
+        SocketService().connect(userId: loggedInUser); // Use email or user ID if preferred
+
+        // ✅ Navigate to inbox
         Navigator.pushReplacement(
           context,
           MaterialPageRoute(
@@ -70,8 +75,7 @@ class _LoginScreenState extends State<LoginScreen> {
         child: Card(
           elevation: 4,
           margin: const EdgeInsets.all(20),
-          shape:
-              RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
           child: Padding(
             padding: const EdgeInsets.all(20),
             child: Column(
@@ -95,11 +99,8 @@ class _LoginScreenState extends State<LoginScreen> {
                     prefixIcon: const Icon(Icons.lock),
                     border: const OutlineInputBorder(),
                     suffixIcon: IconButton(
-                      icon: Icon(_obscurePassword
-                          ? Icons.visibility
-                          : Icons.visibility_off),
-                      onPressed: () =>
-                          setState(() => _obscurePassword = !_obscurePassword),
+                      icon: Icon(_obscurePassword ? Icons.visibility : Icons.visibility_off),
+                      onPressed: () => setState(() => _obscurePassword = !_obscurePassword),
                     ),
                   ),
                 ),
@@ -114,15 +115,15 @@ class _LoginScreenState extends State<LoginScreen> {
                             _loginUser(email, password);
                           } else {
                             ScaffoldMessenger.of(context).showSnackBar(
-                              const SnackBar(
-                                  content: Text('Please fill in all fields')),
+                              const SnackBar(content: Text('Please fill in all fields')),
                             );
                           }
                         },
                         icon: const Icon(Icons.login),
                         label: const Text('Login'),
                         style: ElevatedButton.styleFrom(
-                            minimumSize: const Size.fromHeight(48)),
+                          minimumSize: const Size.fromHeight(48),
+                        ),
                       ),
               ],
             ),

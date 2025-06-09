@@ -1,8 +1,10 @@
-import 'package:chat_app_flutter/home_page.dart';
 import 'package:flutter/material.dart';
+import 'package:chat_app_flutter/home_page.dart';
 
 void main() {
-  WidgetsFlutterBinding.ensureInitialized(); // Ensure Flutter bindings are initialized
+  WidgetsFlutterBinding.ensureInitialized();
+  // You can connect here if you know the user, or after login
+  // SocketService().connect(userId: 'CURRENT_USER_ID');
   runApp(const MyApp());
 }
 
