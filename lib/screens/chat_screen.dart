@@ -7,6 +7,8 @@ import 'package:http/http.dart' as http;
 import '../models/message.dart' as models;
 import '../services/socket_service.dart';
 import '../screens/call_screen.dart';
+import '../services/call_service.dart';
+
 
 class ChatScreen extends StatefulWidget {
   final String currentUser; // must be username
@@ -31,6 +33,7 @@ class _ChatScreenState extends State<ChatScreen> {
   final SocketService socketService = SocketService();
   List<models.Message> messages = [];
   bool _showEmojiPicker = false;
+  late CallService callService;
 
   @override
   void initState() {
@@ -53,6 +56,7 @@ class _ChatScreenState extends State<ChatScreen> {
       }
     });
   }
+  
 
   void _connectToSocket() {
     print('Registering listeners for user: ${widget.currentUser}');

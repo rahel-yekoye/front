@@ -3,6 +3,7 @@ import 'package:socket_io_client/socket_io_client.dart' as IO;
 import 'dart:async';
 import '../models/message.dart' as models;
 import '../screens/call_screen.dart';
+import 'package:chat_app_flutter/services/call_service.dart';
 
 class SocketService {
   static final SocketService _instance = SocketService._internal();
