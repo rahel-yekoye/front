@@ -1,9 +1,9 @@
-// ... all your previous imports
 import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart';
 import '../services/socket_service.dart';
 import '../services/call_service.dart';
+import 'package:flutter/foundation.dart'; // for kIsWeb
 
 enum CallStatus {
   idle,
@@ -23,16 +23,18 @@ class CallScreen extends StatefulWidget {
   final bool isCaller;
   final bool voiceOnly;
   final String callerName;
+  final VoidCallback? onCallScreenClosed;
 
   const CallScreen({
-    Key? key,
+    super.key,
     required this.socketService,
     required this.selfId,
     required this.peerId,
     required this.isCaller,
     required this.voiceOnly,
     required this.callerName,
-  }) : super(key: key);
+    this.onCallScreenClosed,
+  });
 
   @override
   State<CallScreen> createState() => _CallScreenState();
@@ -45,19 +47,22 @@ class _CallScreenState extends State<CallScreen> {
   CallStatus _callStatus = CallStatus.idle;
   bool _isMuted = false;
   bool _speakerOn = false;
-  Timer? _callTimer;
   int _callDurationSeconds = 0;
   late CallService _callService;
   Timer? _callTimeoutTimer;
   bool _hasAnswered = false;
+  Timer? _callDurationTimer;
+  String _remoteName = "";
+  bool _hasExited = false;
 
   @override
   void initState() {
     super.initState();
+    _remoteName = widget.isCaller ? widget.peerId : widget.callerName;
     _initializeRenderers();
 
     _callService = CallService(
-      socket: widget.socketService.socket,
+      socket: widget.socketService.socket, // <-- use the socket from the injected SocketService
       selfId: widget.selfId,
       onCallDeclined: _onCallDeclined,
       onCallEnded: _onCallEnded,
@@ -66,18 +71,8 @@ class _CallScreenState extends State<CallScreen> {
       onCallTimeout: _onCallTimeout,
       onCallConnected: _onCallConnected,
       onIncomingCall: _onIncomingCall,
+      onCallCancelled: _onCallCancelled,
     );
-    
-
-    _callService.onCallEndedUI = () {
-      if (mounted) Navigator.of(context).pop();
-    };
-
-    _startTimeoutTimer();
-
-    widget.socketService.socket.on('call_ended', (_) {
-      if (mounted) Navigator.of(context).pop();
-    });
 
     if (widget.isCaller) {
       _callStatus = CallStatus.outgoing;
@@ -88,17 +83,9 @@ class _CallScreenState extends State<CallScreen> {
       );
       _startCallTimeoutCountdown();
     } else {
-      _callStatus = CallStatus.incoming;
+      _callStatus = CallStatus.ringing;
+      _startTimeoutTimer();
     }
-  }
-
-  void _startTimeoutTimer() {
-    _callTimeoutTimer = Timer(const Duration(seconds: 45), () {
-      if (!_hasAnswered) {
-        _callService.endCall(to: widget.peerId);
-        if (mounted) Navigator.of(context).pop();
-      }
-    });
   }
 
   Future<void> _initializeRenderers() async {
@@ -108,17 +95,30 @@ class _CallScreenState extends State<CallScreen> {
 
   @override
   void dispose() {
-    _callTimer?.cancel();
+    _callService.dispose();
+    if (widget.onCallScreenClosed != null) {
+      widget.onCallScreenClosed!();
+    }
+    _callTimeoutTimer?.cancel();
+    _callDurationTimer?.cancel();
     _remoteRenderer.dispose();
     _localRenderer.dispose();
-    _callService.dispose();
-    widget.socketService.socket.off('call_ended');
     super.dispose();
   }
 
+  void _startTimeoutTimer() {
+    _callTimeoutTimer?.cancel();
+    _callTimeoutTimer = Timer(const Duration(seconds: 45), () {
+      if (!_hasAnswered) {
+        _callService.endCall(to: widget.peerId);
+        _exitCallScreen();
+      }
+    });
+  }
+
   void _startCallTimeoutCountdown() {
-    _callTimer?.cancel();
-    _callTimer = Timer(const Duration(seconds: 30), () {
+    _callTimeoutTimer?.cancel();
+    _callTimeoutTimer = Timer(const Duration(seconds: 30), () {
       if (_callStatus == CallStatus.outgoing) {
         _onCallTimeout();
       }
@@ -127,8 +127,8 @@ class _CallScreenState extends State<CallScreen> {
 
   void _startCallDurationTimer() {
     _callDurationSeconds = 0;
-    _callTimer?.cancel();
-    _callTimer = Timer.periodic(const Duration(seconds: 1), (_) {
+    _callDurationTimer?.cancel();
+    _callDurationTimer = Timer.periodic(const Duration(seconds: 1), (timer) {
       if (mounted) {
         setState(() {
           _callDurationSeconds++;
@@ -138,7 +138,8 @@ class _CallScreenState extends State<CallScreen> {
   }
 
   void _stopCallDurationTimer() {
-    _callTimer?.cancel();
+    _callDurationTimer?.cancel();
+    _callDurationTimer = null;
   }
 
   String _formatDuration(int seconds) {
@@ -147,35 +148,41 @@ class _CallScreenState extends State<CallScreen> {
     return '${minutes.toString().padLeft(2, '0')}:${secs.toString().padLeft(2, '0')}';
   }
 
-  void _onCallDeclined(Map<String, dynamic> _) {
+  void _onCallDeclined([Map<String, dynamic>? _]) {
     if (!mounted) return;
+    _stopCallDurationTimer();
     setState(() => _callStatus = CallStatus.declined);
-    _showCallEndedDialog('Call Declined');
+    // Show "Call ended" for 1 second before exiting
+    Future.delayed(const Duration(seconds: 1), () {
+      _exitCallScreen();
+    });
   }
 
-  void _onCallEnded(Map<String, dynamic> _) {
+  void _onCallEnded(dynamic _) {
     if (!mounted) return;
+    _stopCallDurationTimer();
     setState(() => _callStatus = CallStatus.ended);
-    _showCallEndedDialog('Call Ended');
+    _exitCallScreen();
   }
 
   void _onCallTimeout() {
     if (!mounted) return;
+    _stopCallDurationTimer();
     setState(() => _callStatus = CallStatus.timeout);
     _callService.endCall(to: widget.peerId);
-    _showCallEndedDialog('No Answer');
-    // Add this:
-    Future.delayed(const Duration(milliseconds: 500), () {
-      if (mounted && Navigator.of(context).canPop()) {
-        Navigator.of(context).pop();
-      }
+    // Show "Call ended" for 1 second before exiting
+    Future.delayed(const Duration(seconds: 1), () {
+      _exitCallScreen();
     });
   }
 
   void _onCallConnected() {
-    if (!mounted) return;
-    setState(() => _callStatus = CallStatus.connected);
+    _callTimeoutTimer?.cancel();
+    setState(() {
+      _callStatus = CallStatus.connected;
+    });
     _startCallDurationTimer();
+    _listenPeerConnectionState();
   }
 
   void _onRemoteStreamReceived(MediaStream stream) {
@@ -188,78 +195,104 @@ class _CallScreenState extends State<CallScreen> {
 
   void _onIncomingCall(String callerId, bool voiceOnly, String callerName) {
     if (!mounted) return;
-    if (_callStatus != CallStatus.incoming) {
-      setState(() => _callStatus = CallStatus.incoming);
-    }
+    setState(() {
+      _callStatus = CallStatus.incoming;
+      _remoteName = callerName;
+    });
   }
 
   Future<void> _answerCall() async {
-    print('[CallScreen] Answer button pressed');
+    if (_hasAnswered) return;
     _hasAnswered = true;
     _callTimeoutTimer?.cancel();
+    setState(() {
+      _callStatus = CallStatus.connected;
+    });
+    _startCallDurationTimer();
     await _callService.answerCall();
+    _listenPeerConnectionState();
   }
 
   void _rejectCall() {
     _callService.declineCall(to: widget.peerId);
-    Navigator.pop(context);
+    _exitCallScreen();
   }
 
   void _endCall() {
+    widget.socketService.socket.emit('end_call', {
+      'from': widget.selfId,
+      'to': widget.peerId,
+      'durationSeconds': _callDurationSeconds, // Make sure this is set!
+    });
     _callService.endCall(to: widget.peerId);
-    Navigator.pop(context);
+    _stopCallDurationTimer();
+    setState(() => _callStatus = CallStatus.ended);
+    _exitCallScreen();
   }
 
   void _toggleMute() {
     setState(() {
       _isMuted = !_isMuted;
-      _callService.toggleMute(_isMuted);
+      if (_callService.localStream != null) {
+        for (var track in _callService.localStream!.getAudioTracks()) {
+          track.enabled = !_isMuted;
+        }
+      }
     });
   }
 
   void _toggleSpeaker() {
     setState(() {
       _speakerOn = !_speakerOn;
-      Helper.setSpeakerphoneOn(_speakerOn);
+      if (!kIsWeb) {
+        Helper.setSpeakerphoneOn(_speakerOn);
+      }
     });
   }
 
-  void _showCallEndedDialog(String message) {
-    if (!mounted) return;
-
-    showDialog(
-      context: context,
-      barrierDismissible: false,
-      builder: (_) => AlertDialog(
-        title: Text(message),
-        actions: [
-          TextButton(
-            onPressed: () {
-              Navigator.of(context).pop(); // dialog
-              if (Navigator.of(context).canPop()) {
-                Navigator.of(context).pop(); // CallScreen
-              }
-            },
-            child: const Text('OK'),
-          )
-        ],
-      ),
-    );
+  void _exitCallScreen() {
+    if (_hasExited) return;
+    _hasExited = true;
+    print('[CallScreen] Exiting call screen');
+    Future.delayed(const Duration(milliseconds: 300), () {
+      if (mounted) {
+        Navigator.of(context).maybePop();
+      }
+    });
   }
 
-  /// ✅ NEW METHOD: Cancel outgoing call
   void cancelOutgoingCall() {
     if (widget.peerId.isNotEmpty) {
       widget.socketService.socket.emit('call_cancelled', {
         'from': widget.selfId,
         'to': widget.peerId,
       });
-      print('[CallScreen] Emitted call_cancelled to ${widget.peerId}');
     }
-
     _callService.dispose();
-    _callTimer?.cancel();
-    Navigator.of(context).pop();
+    _callTimeoutTimer?.cancel();
+    _stopCallDurationTimer();
+    _exitCallScreen();
+  }
+
+  void _listenPeerConnectionState() {
+    final pc = _callService.peerConnection;
+    if (pc == null) return;
+    pc.onConnectionState = (state) {
+      print('[CallScreen] PeerConnection state: $state');
+      if (state == RTCPeerConnectionState.RTCPeerConnectionStateDisconnected ||
+          state == RTCPeerConnectionState.RTCPeerConnectionStateFailed ||
+          state == RTCPeerConnectionState.RTCPeerConnectionStateClosed) {
+        _onCallEnded(null);
+      }
+    };
+  }
+
+  void _onCallCancelled([Map<String, dynamic>? data]) {
+    if (!mounted) return;
+    if (_callStatus == CallStatus.ringing && !_hasAnswered) {
+      // Send missed call message to chat
+         }
+    _exitCallScreen();
   }
 
   // ------------------- UI -----------------------
@@ -267,7 +300,7 @@ class _CallScreenState extends State<CallScreen> {
     return Column(
       mainAxisAlignment: MainAxisAlignment.center,
       children: [
-        Text('Incoming call from ${widget.callerName}',
+        Text('Incoming call from $_remoteName',
             style: const TextStyle(
                 color: Colors.white, fontSize: 22, fontWeight: FontWeight.bold)),
         const SizedBox(height: 30),
@@ -321,33 +354,59 @@ class _CallScreenState extends State<CallScreen> {
     );
   }
 
+  Widget _buildRingingUI() {
+    return Column(
+      mainAxisAlignment: MainAxisAlignment.center,
+      children: [
+        const Text('Ringing...',
+            style: TextStyle(color: Colors.white, fontSize: 24)),
+        const SizedBox(height: 20),
+        const CircularProgressIndicator(color: Colors.white),
+        const SizedBox(height: 40),
+        ElevatedButton(
+          onPressed: cancelOutgoingCall,
+          style: ElevatedButton.styleFrom(
+            backgroundColor: Colors.red,
+            shape: const CircleBorder(),
+            padding: const EdgeInsets.all(20),
+          ),
+          child: const Icon(Icons.call_end, size: 32),
+        ),
+      ],
+    );
+  }
+
   Widget _buildInCallUI() {
     return Stack(
       children: [
         Positioned.fill(
-          child: widget.voiceOnly
-              ? const Center(
-                  child: Icon(Icons.call, color: Colors.white, size: 100),
-                )
-              : RTCVideoView(_remoteRenderer,
-                  objectFit: RTCVideoViewObjectFit.RTCVideoViewObjectFitCover),
+          child: RTCVideoView(
+            _remoteRenderer,
+            objectFit: RTCVideoViewObjectFit.RTCVideoViewObjectFitCover,
+          ),
         ),
+        if (widget.voiceOnly)
+          const Center(
+            child: Icon(Icons.call, color: Colors.white, size: 100),
+          ),
         if (!widget.voiceOnly)
           Positioned(
             right: 20,
             bottom: 200,
             width: 120,
             height: 160,
-            child: RTCVideoView(_localRenderer,
-                mirror: true,
-                objectFit: RTCVideoViewObjectFit.RTCVideoViewObjectFitCover),
+            child: RTCVideoView(
+              _localRenderer,
+              mirror: true,
+              objectFit: RTCVideoViewObjectFit.RTCVideoViewObjectFitCover,
+            ),
           ),
         Align(
           alignment: Alignment.topCenter,
           child: Padding(
             padding: const EdgeInsets.only(top: 60),
             child: Text(
-              'In call with ${widget.callerName}',
+              'In call with $_remoteName',
               style: const TextStyle(color: Colors.white, fontSize: 20),
             ),
           ),
@@ -401,6 +460,9 @@ class _CallScreenState extends State<CallScreen> {
   Widget build(BuildContext context) {
     Widget body;
     switch (_callStatus) {
+      case CallStatus.ringing:
+        body = _buildRingingUI();
+        break;
       case CallStatus.incoming:
         body = _buildIncomingCallUI();
         break;

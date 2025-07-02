@@ -3,7 +3,6 @@ import 'package:socket_io_client/socket_io_client.dart' as IO;
 import 'dart:async';
 import '../models/message.dart' as models;
 import '../screens/call_screen.dart';
-import 'package:chat_app_flutter/services/call_service.dart';
 
 class SocketService {
   static final SocketService _instance = SocketService._internal();
@@ -108,6 +107,18 @@ class SocketService {
       }
     }
   }
+void onMessagesRead(Function(Map<String, dynamic>) callback) {
+  _socket?.off('messages_read');
+  _socket?.on('messages_read', (data) {
+    print('📩 messages_read event received: $data');
+    if (data is Map<String, dynamic>) {
+      callback(data);
+    } else if (data is Map) {
+      // Some dart:io socket.io versions may not cast perfectly
+      callback(Map<String, dynamic>.from(data));
+    }
+  });
+}
 
   void sendMessage(Map<String, dynamic> messageData) {
     if (_socket != null && _socket!.connected) {
@@ -320,6 +331,6 @@ class SocketService {
   }
 
   void offIncomingCall() {
-    _socket?.off('incoming_call');
+    socket.off('incoming_call');
   }
 }

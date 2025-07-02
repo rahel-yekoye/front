@@ -14,6 +14,7 @@ class CallService {
   final void Function()? onCallConnected;
   final void Function(String fromId, bool voiceOnly, String callerName) onIncomingCall;
   final void Function() onCallTimeout;
+  final void Function(Map<String, dynamic>) onCallCancelled; // <-- Add this line
 
   RTCPeerConnection? _peerConnection;
   MediaStream? _localStream;
@@ -40,6 +41,7 @@ class CallService {
     required this.onCallTimeout,
     this.onCallConnected,
     this.onLocalStream,
+    required this.onCallCancelled, // <-- Modify this line
   }) {
     print('[CallService] Initializing CallService for user $selfId');
     _initializeSocketListeners();
@@ -47,15 +49,22 @@ class CallService {
   }
 
   void _initializeSocketListeners() {
+    socket.off('incoming_call');
+    socket.off('call_offer');
+    socket.off('answer_made');
+    socket.off('ice_candidate');
+    socket.off('call_declined');
+    socket.off('call_ended');
+    socket.off('call_cancelled');
+    socket.off('call_missed');
+
     socket.on('incoming_call', (data) {
       final fromId = data['from'] as String;
       final voiceOnly = data['voiceOnly'] ?? false;
       final callerName = data['callerName'] ?? 'Unknown';
       print('[SOCKET EVENT] incoming_call: $data');
       _currentCallPartnerId = fromId;
-      if (onIncomingCall != null) {
-        onIncomingCall!(fromId, voiceOnly, callerName);
-      }
+      onIncomingCall(fromId, voiceOnly, callerName);
     });
 
     socket.on('call_offer', (data) async {
@@ -68,11 +77,11 @@ class CallService {
         return;
       }
 
-      // Defensive: always ensure type is a string
       final offerType = (data['type'] is String && data['type'] != null) ? data['type'] : 'offer';
       _remoteOffer = {
         'sdp': data['offer'],
         'type': offerType,
+        'voiceOnly': data['voiceOnly'] ?? false,
       };
       _currentCallPartnerId = fromId;
 
@@ -97,13 +106,13 @@ class CallService {
         print('[CallService] Setting remote description with answer...');
         await _peerConnection!.setRemoteDescription(answer);
 
-        // --- Add all queued ICE candidates now ---
         _remoteDescriptionSet = true;
         for (final c in _pendingCandidates) {
           await _peerConnection?.addCandidate(c);
         }
         _pendingCandidates.clear();
-        // ----------------------------------------
+
+        _callTimeoutTimer?.cancel();
 
         if (onCallConnected != null) {
           onCallConnected!();
@@ -125,8 +134,6 @@ class CallService {
       final rawSdpMid = candidateData['sdpMid'];
       final rawSdpMLineIndex = candidateData['sdpMLineIndex'];
 
-      print('DEBUG: candidate=$rawCandidate (${rawCandidate.runtimeType}), sdpMid=$rawSdpMid (${rawSdpMid.runtimeType}), sdpMLineIndex=$rawSdpMLineIndex (${rawSdpMLineIndex.runtimeType})');
-
       if (rawCandidate == null || rawSdpMid == null || rawSdpMLineIndex == null) {
         print('DEBUG: One of the ICE candidate fields is null, skipping!');
         return;
@@ -138,7 +145,6 @@ class CallService {
         rawSdpMLineIndex is int ? rawSdpMLineIndex : int.tryParse(rawSdpMLineIndex.toString()) ?? 0,
       );
 
-      // Accept candidates if in call and from the right partner, or if waiting for answer
       if ((_isInCall && fromId == _currentCallPartnerId) || (!_isInCall && fromId == _currentCallPartnerId)) {
         if (_remoteDescriptionSet && _peerConnection != null) {
           print('[CallService] Adding ICE candidate immediately.');
@@ -165,38 +171,34 @@ class CallService {
     });
 
     socket.on('call_ended', (data) {
-      final fromId = data['from'] as String;
-      print('[CallService] Call ended by $fromId');
-      if (_currentCallPartnerId != fromId) {
-        print('[CallService] End call from unrelated user, ignoring.');
-        return;
-      }
-      onCallEnded(data);
-      _cleanup();
-      if (onCallEndedUI != null) {
-        onCallEndedUI!();
-      }
-    });
+  print('[CallService] Call ended event received: $data');
+  onCallEnded(data);
+  _cleanup();
+  if (onCallEndedUI != null) {
+    onCallEndedUI!();
+  }
+});
 
     socket.on('call_cancelled', (data) {
-      final fromId = data['from'] as String;
-      print('[CallService] Call cancelled by $fromId');
-      if (_currentCallPartnerId != fromId) {
-        print('[CallService] Cancel from unrelated user, ignoring.');
-        return;
+      if (!_isInCall) {
+        _sendMissedCallMessage(
+          from: data['from'] ?? selfId,
+          to: data['to'] ?? selfId,
+          content: 'Missed call from ${data['from'] ?? 'Unknown'}',
+        );
       }
+      onCallCancelled.call(data);
       _cleanup();
-      if (onCallEndedUI != null) {
-        onCallEndedUI!();
-      }
     });
 
     socket.on('call_missed', (data) {
-      final fromId = data['from'] as String;
-      print('[CallService] Call missed from $fromId');
-      if (_currentCallPartnerId != fromId) {
-        print('[CallService] Missed call from unrelated user, ignoring.');
-        return;
+      // Only send missed call if not answered
+      if (!_isInCall) {
+        _sendMissedCallMessage(
+          from: data['from'] ?? selfId,
+          to: data['to'] ?? selfId,
+          content: 'Missed call from ${data['from'] ?? 'Unknown'}',
+        );
       }
       onCallDeclined(data);
       _cleanup();
@@ -220,9 +222,9 @@ class CallService {
 
     final config = {
       'iceServers': [
-          {'urls': 'stun:stun.l.google.com:19302'}, // STUN
+        {'urls': 'stun:stun.l.google.com:19302'},
         {
-          'urls': 'turn:global.relay.twilio.com:3478?transport=udp', // TURN (for testing)
+          'urls': 'turn:global.relay.twilio.com:3478?transport=udp',
           'username': 'test',
           'credential': 'test'
         },
@@ -230,9 +232,13 @@ class CallService {
     };
 
     try {
+      _localStream = await getUserMedia(voiceOnly: voiceOnly);
+      if (onLocalStream != null && _localStream != null) {
+        onLocalStream!(_localStream!);
+      }
+
       _peerConnection = await createPeerConnection(config);
 
-      _localStream = await getUserMedia(voiceOnly: voiceOnly);
       _localStream?.getTracks().forEach((track) {
         _peerConnection?.addTrack(track, _localStream!);
       });
@@ -244,19 +250,6 @@ class CallService {
           onRemoteStream(_remoteStream!);
         } else {
           print('[CallService] onTrack triggered, but no streams in event');
-        }
-      };
-
-      if (onLocalStream != null && _localStream != null) {
-        onLocalStream!(_localStream!);
-      }
-
-      _peerConnection?.onConnectionState = (state) {
-        print('[CallService] Connection state changed: $state');
-        if (state == RTCPeerConnectionState.RTCPeerConnectionStateConnected) {
-          if (onCallConnected != null) {
-            onCallConnected!();
-          }
         }
       };
 
@@ -342,77 +335,77 @@ class CallService {
       },
     });
   }
-Future<void> answerCall() async {
-  if (_currentCallPartnerId == null || _remoteOffer == null) {
-    print('[CallService] No call partner ID or offer to answer call.');
-    return;
-  }
 
-  // Set this early so ICE candidates are not ignored
-  _isInCall = true;
-
-  print('[CallService] _remoteOffer: $_remoteOffer'); // Debug print
-
-  try {
-    print('[CallService] Creating peer connection for answering call...');
-    await _createPeerConnection();
-
-    final offerSdp = (_remoteOffer!['sdp'] is String && _remoteOffer!['sdp'] != null && _remoteOffer!['sdp'] != '')
-        ? _remoteOffer!['sdp']
-        : '';
-
-    final offerType = (_remoteOffer!['type'] is String && _remoteOffer!['type'] != null && _remoteOffer!['type'] != '')
-        ? _remoteOffer!['type']
-        : 'offer';
-
-    final offer = RTCSessionDescription(
-      offerSdp,
-      offerType,
-    );
-    await _peerConnection?.setRemoteDescription(offer);
-
-    // --- Add all queued ICE candidates now ---
-    _remoteDescriptionSet = true;
-    for (final c in _pendingCandidates) {
-      await _peerConnection?.addCandidate(c);
+  Future<void> answerCall() async {
+    if (_currentCallPartnerId == null || _remoteOffer == null) {
+      print('[CallService] No call partner ID or offer to answer call.');
+      return;
     }
-    _pendingCandidates.clear();
-    // ----------------------------------------
 
-    print('[CallService] Creating answer...');
-    final answer = await _peerConnection!.createAnswer();
-    await _peerConnection!.setLocalDescription(answer);
+    _isInCall = true;
 
-    print('[CallService] Sending answer to $_currentCallPartnerId...');
-    socket.emit('make_answer', {
-      'to': _currentCallPartnerId,
-      'from': selfId,
-      'answer': {
-        'sdp': answer.sdp,
-        'type': answer.type,
-      },
-    });
+    print('[CallService] _remoteOffer: $_remoteOffer');
 
-    socket.emit('call_answered', {
-      'from': selfId,
-      'to': _currentCallPartnerId,
-    });
+    try {
+      print('[CallService] Creating peer connection for answering call...');
 
-    // _isInCall = true; // Already set above
-  } catch (e) {
-    print('[CallService] Error answering call: $e');
+      bool voiceOnly = false;
+      if (_remoteOffer != null && _remoteOffer!['voiceOnly'] != null) {
+        voiceOnly = _remoteOffer!['voiceOnly'] == true;
+      }
+      _localStream = await getUserMedia(voiceOnly: voiceOnly);
+      if (onLocalStream != null && _localStream != null) {
+        onLocalStream!(_localStream!);
+      }
+
+      await _createPeerConnection();
+
+      final offerSdp = (_remoteOffer!['sdp'] is String && _remoteOffer!['sdp'] != null && _remoteOffer!['sdp'] != '')
+          ? _remoteOffer!['sdp']
+          : '';
+
+      final offerType = (_remoteOffer!['type'] is String && _remoteOffer!['type'] != null && _remoteOffer!['type'] != '')
+          ? _remoteOffer!['type']
+          : 'offer';
+
+      final offer = RTCSessionDescription(
+        offerSdp,
+        offerType,
+      );
+      await _peerConnection?.setRemoteDescription(offer);
+
+      _remoteDescriptionSet = true;
+      for (final c in _pendingCandidates) {
+        await _peerConnection?.addCandidate(c);
+      }
+      _pendingCandidates.clear();
+
+      print('[CallService] Creating answer...');
+      final answer = await _peerConnection!.createAnswer();
+      await _peerConnection!.setLocalDescription(answer);
+
+      print('[CallService] Sending answer to $_currentCallPartnerId...');
+      socket.emit('make_answer', {
+        'to': _currentCallPartnerId,
+        'from': selfId,
+        'answer': {
+          'sdp': answer.sdp,
+          'type': answer.type,
+        },
+      });
+
+      socket.emit('call_answered', {
+        'from': selfId,
+        'to': _currentCallPartnerId,
+      });
+
+    } catch (e) {
+      print('[CallService] Error answering call: $e');
+    }
   }
-}
 
   void dispose() {
-    _localStream?.getTracks().forEach((track) => track.stop());
-    _localStream = null;
-    _peerConnection?.close();
-    _peerConnection = null;
-    _remoteStream?.getTracks().forEach((track) => track.stop());
-    _remoteStream = null;
-    _callTimeoutTimer?.cancel();
-    _callTimeoutTimer = null;
+    _cleanup();
   }
 
   void declineCall({required String to}) {
@@ -438,13 +431,24 @@ Future<void> answerCall() async {
 
   void _startCallTimeout() {
     _callTimeoutTimer = Timer(Duration(seconds: 30), () {
-      print('[CallService] Call timeout. No answer received.');
-      onCallTimeout();
-      socket.emit('call_missed', {
-        'from': selfId,
-        'to': _currentCallPartnerId,
-      });
-      _cleanup();
+      if (!_isInCall || _peerConnection?.connectionState != RTCPeerConnectionState.RTCPeerConnectionStateConnected) {
+        print('[CallService] Call timeout. No answer received.');
+        onCallTimeout();
+        socket.emit('call_missed', {
+          'from': selfId,
+          'to': _currentCallPartnerId,
+        });
+        _sendMissedCallMessage(
+          from: selfId,
+          to: _currentCallPartnerId ?? '',
+          content: 'Missed call from $selfId',
+        );
+        socket.emit('call_ended', {
+          'from': selfId,
+          'to': _currentCallPartnerId,
+        });
+        _cleanup();
+      }
     });
   }
 
@@ -464,15 +468,6 @@ Future<void> answerCall() async {
     }
   }
 
-  void _startCallDurationTimer(void Function(int seconds) onTick) {
-    _callSeconds = 0;
-    _callTimer?.cancel();
-    _callTimer = Timer.periodic(Duration(seconds: 1), (timer) {
-      _callSeconds++;
-      onTick(_callSeconds);
-    });
-  }
-
   void stopCallDurationTimer() {
     _callTimer?.cancel();
     _callTimer = null;
@@ -480,7 +475,9 @@ Future<void> answerCall() async {
   }
 
   void switchCamera() {
-    final MediaStreamTrack? videoTrack = _localStream!.getVideoTracks().firstWhere(
+    // Only call Helper.switchCamera on mobile, not web
+    // (add kIsWeb check if needed)
+    final videoTrack = _localStream?.getVideoTracks().firstWhere(
       (track) => track.kind == 'video',
       orElse: () => null as MediaStreamTrack,
     );
@@ -490,6 +487,7 @@ Future<void> answerCall() async {
   }
 
   void toggleSpeaker(bool enabled) {
+    // Only call Helper.setSpeakerphoneOn on mobile, not web
     Helper.setSpeakerphoneOn(enabled);
   }
 
@@ -550,6 +548,16 @@ Future<void> answerCall() async {
       onRemoteStream(stream);
     };
 
+    _peerConnection?.onConnectionState = (state) {
+      print('[CallService] Connection state changed: $state');
+      if (state == RTCPeerConnectionState.RTCPeerConnectionStateConnected) {
+        _callTimeoutTimer?.cancel();
+        if (onCallConnected != null) {
+          onCallConnected!();
+        }
+      }
+    };
+
     if (_localStream != null) {
       _peerConnection?.addStream(_localStream!);
     }
@@ -558,4 +566,18 @@ Future<void> answerCall() async {
   bool get isInCall => _isInCall;
   MediaStream? get localStream => _localStream;
   MediaStream? get remoteStream => _remoteStream;
+  RTCPeerConnection? get peerConnection => _peerConnection;
+
+  void _sendMissedCallMessage({required String from, required String to, required String content}) {
+  socket.emit('send_message', {
+    'sender': from,
+    'receiver': to,
+    'content': content,
+    'type': 'missed_call',
+    'timestamp': DateTime.now().toIso8601String(),
+    'isGroup': false,
+    'emojis': [],
+    'fileUrl': '',
+  });
+}
 }
