@@ -54,7 +54,7 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
   }
 
   Future<void> _fetchMessages() async {
-    final url = Uri.parse('http://localhost:4000/groups/${widget.groupId}/messages');
+    final url = Uri.parse('http://192.168.20.1434000/groups/${widget.groupId}/messages');
     try {
       final response = await http.get(
         url,
@@ -81,7 +81,7 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
   }
 
   Future<void> _fetchGroupMembers() async {
-    final url = Uri.parse('http://localhost:4000/groups/${widget.groupId}');
+    final url = Uri.parse('http://192.168.20.1434000/groups/${widget.groupId}');
     try {
       final response = await http.get(
         url,
@@ -99,7 +99,7 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
   }
 
   Future<void> _fetchAllUsers() async {
-    final url = Uri.parse('http://localhost:4000/users');
+    final url = Uri.parse('http://192.168.20.1434000/users');
     try {
       final response = await http.get(
         url,
@@ -130,7 +130,7 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
 // The issue is likely from socket not emitting `join_group` correctly when the socket is reused or connection is late.
 
 void _connectToSocket() {
-  socket = IO.io('http://localhost:4000', <String, dynamic>{
+  socket = IO.io('http://192.168.20.1434000', <String, dynamic>{
     'transports': ['websocket'],
     'autoConnect': false,
     'extraHeaders': {'Authorization': 'Bearer ${widget.jwtToken}'},
@@ -211,7 +211,7 @@ void _connectToSocket() {
       PlatformFile file = result.files.first;
       var request = http.MultipartRequest(
         'POST',
-        Uri.parse('http://localhost:4000/upload'),
+        Uri.parse('http://192.168.20.1434000/upload'),
       );
       request.files.add(await http.MultipartFile.fromPath('file', file.path!));
       var response = await request.send();
@@ -407,7 +407,7 @@ void _connectToSocket() {
   }
 
   Future<List<String>> _fetchUserGroupIds() async {
-    final url = Uri.parse('http://localhost:4000/users/${widget.currentUser}/groups');
+    final url = Uri.parse('http://192.168.20.1434000/users/${widget.currentUser}/groups');
     try {
       final response = await http.get(
         url,

@@ -41,7 +41,7 @@ class _InboxScreenState extends State<InboxScreen>
 
   Future<void> _fetchConversations() async {
     final url = Uri.parse(
-        'http://localhost:4000/conversations?user=${widget.currentUser}');
+        'http://192.168.20.143:4000/conversations?user=${widget.currentUser}');
     try {
       final response = await http.get(
         url,
@@ -61,7 +61,7 @@ class _InboxScreenState extends State<InboxScreen>
   }
 
   Future<void> _fetchGroups() async {
-    final url = Uri.parse('http://localhost:4000/groups');
+    final url = Uri.parse('http://192.168.20.143:4000/groups');
     try {
       final response = await http.get(
         url,
@@ -78,7 +78,7 @@ class _InboxScreenState extends State<InboxScreen>
 
   Future<String> _fetchLastGroupMessage(String groupId) async {
     final url =
-        Uri.parse('http://localhost:4000/groups/$groupId/last-message');
+        Uri.parse('http://192.168.20.143:4000/groups/$groupId/last-message');
     try {
       final response = await http.get(
         url,
@@ -100,7 +100,7 @@ class _InboxScreenState extends State<InboxScreen>
   }
 
   void _connectToSocket() {
-    socket = IO.io('http://localhost:4000', <String, dynamic>{
+    socket = IO.io('http://192.168.20.143:4000', <String, dynamic>{
       'transports': ['websocket'],
       'autoConnect': true,
     });

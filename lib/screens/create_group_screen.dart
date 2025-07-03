@@ -34,7 +34,7 @@ class _CreateGroupScreenState extends State<CreateGroupScreen> {
   }
 
   Future<void> _fetchUsers() async {
-    final url = Uri.parse('http://localhost:4000/users');
+    final url = Uri.parse('http://192.168.20.143:4000/users');
     try {
       final response = await http.get(
         url,
@@ -55,7 +55,7 @@ class _CreateGroupScreenState extends State<CreateGroupScreen> {
   }
 
   Future<void> _fetchGroups() async {
-    final url = Uri.parse('http://localhost:4000/groups');
+    final url = Uri.parse('http://192.168.20.143:4000/groups');
     try {
       final response = await http.get(
         url,
@@ -108,7 +108,7 @@ class _CreateGroupScreenState extends State<CreateGroupScreen> {
       isLoading = true;
     });
 
-    final url = Uri.parse('http://localhost:4000/groups');
+    final url = Uri.parse('http://192.168.20.143:4000/groups');
     try {
       final response = await http.post(
         url,
@@ -146,7 +146,7 @@ class _CreateGroupScreenState extends State<CreateGroupScreen> {
   }
 
   Future<String> _fetchLastGroupMessage(String groupId) async {
-    final url = Uri.parse('http://localhost:4000/groups/$groupId/last-message');
+    final url = Uri.parse('http://192.168.20.143:4000/groups/$groupId/last-message');
     try {
       final response = await http.get(
         url,
