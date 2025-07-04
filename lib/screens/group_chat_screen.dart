@@ -98,7 +98,7 @@ void _pickAttachment() async {
 
   Future<void> _fetchMessages() async {
     final url = Uri.parse(
-        'http://192.168.20.145:4000/groups/${widget.groupId}/messages');
+        'http://192.168.137.145:4000/groups/${widget.groupId}/messages');
     try {
       final response = await http.get(
         url,
@@ -128,7 +128,7 @@ void _pickAttachment() async {
 
   Future<void> _fetchGroupMembers() async {
     final url =
-        Uri.parse('http://192.168.20.145:4000/groups/${widget.groupId}');
+        Uri.parse('http://192.168.137.145:4000/groups/${widget.groupId}');
     try {
       final response = await http.get(
         url,
@@ -146,7 +146,7 @@ void _pickAttachment() async {
   }
 
   Future<void> _fetchAllUsers() async {
-    final url = Uri.parse('http://192.168.20.145:4000/users');
+    final url = Uri.parse('http://192.168.137.145:4000/users');
     try {
       final response = await http.get(
         url,
@@ -306,7 +306,7 @@ void _sendMessage({String? content, String? fileUrl}) {
       PlatformFile file = result.files.first;
       var request = http.MultipartRequest(
         'POST',
-        Uri.parse('http://192.168.20.145:4000/upload'),
+        Uri.parse('http://192.168.137.145:4000/upload'),
       );
       request.files.add(await http.MultipartFile.fromPath('file', file.path!));
       var response = await request.send();
@@ -320,7 +320,7 @@ void _sendMessage({String? content, String? fileUrl}) {
 
   Future<List<String>> _fetchUserGroupIds() async {
     final url = Uri.parse(
-        'http://192.168.20.145:4000/users/${widget.currentUser}/groups');
+        'http://192.168.137.145:4000/users/${widget.currentUser}/groups');
     try {
       final response = await http.get(
         url,
@@ -379,7 +379,7 @@ void _sendMessage({String? content, String? fileUrl}) {
 
   Future<void> _deleteGroupMessage(String messageId) async {
     final url = Uri.parse(
-        'http://192.168.20.145:4000/groups/${widget.groupId}/messages/$messageId');
+        'http://192.168.137.145:4000/groups/${widget.groupId}/messages/$messageId');
     try {
       final response = await http.delete(url, headers: {
         'Authorization': 'Bearer ${widget.jwtToken}',
@@ -407,7 +407,7 @@ void _sendMessage({String? content, String? fileUrl}) {
 
   Future<void> _editGroupMessage(String messageId, String newContent) async {
     final url = Uri.parse(
-        'http://192.168.20.145:4000/groups/${widget.groupId}/messages/$messageId');
+        'http://192.168.137.145:4000/groups/${widget.groupId}/messages/$messageId');
     try {
       final response = await http.put(
         url,

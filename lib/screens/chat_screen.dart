@@ -19,7 +19,7 @@ import 'package:file_selector/file_selector.dart';
 import 'package:video_player/video_player.dart';
 import 'package:just_audio/just_audio.dart' as ja;
 //import 'dart:html' as html; // Only import if targeting web, or guard usage with kIsWeb
-import 'package:audioplayers/audioplayers.dart'as ap;
+import 'package:audioplayers/audioplayers.dart' as ap;
 
 class ChatScreen extends StatefulWidget {
   final String currentUser; // must be username
@@ -47,24 +47,23 @@ class _ChatScreenState extends State<ChatScreen> {
   late CallService callService;
   bool _isCallScreenOpen = false;
   final List<PlatformFile> _selectedFiles = [];
-bool _isRemoteFile(String fileUrl) {
-  return fileUrl.startsWith('http://') || fileUrl.startsWith('https://');
-}
-Map<String, VideoPlayerController> _videoControllers = {};
-Map<String, ap.AudioPlayer> _audioPlayers = {};
-Set<String> _selectedMessageIds = {};
-bool get isSelectionMode => _selectedMessageIds.isNotEmpty;
+  bool _isRemoteFile(String fileUrl) {
+    return fileUrl.startsWith('http://') || fileUrl.startsWith('https://');
+  }
 
-@override
-void dispose() {
-  for (var controller in _videoControllers.values) {
-    controller.dispose();
+  final Map<String, VideoPlayerController> _videoControllers = {};
+  final Map<String, ap.AudioPlayer> _audioPlayers = {};
+
+  @override
+  void dispose() {
+    for (var controller in _videoControllers.values) {
+      controller.dispose();
+    }
+    for (var player in _audioPlayers.values) {
+      player.dispose();
+    }
+    super.dispose();
   }
-  for (var player in _audioPlayers.values) {
-    player.dispose();
-  }
-  super.dispose();
-}
 
   @override
   void initState() {
@@ -218,51 +217,24 @@ void dispose() {
       print('[SOCKET EVENT] $event: $data');
     });
   }
-  Future<String?> _uploadFile(PlatformFile file) async {
-    final request = http.MultipartRequest(
-      'POST',
-      Uri.parse('http://192.168.20.143:4000/upload'),
-    );
 
-    if (kIsWeb && file.bytes != null) {
-      request.files.add(
-        http.MultipartFile.fromBytes('file', file.bytes!, filename: file.name),
-      );
-    } else if (file.path != null) {
-      request.files.add(
-        await http.MultipartFile.fromPath('file', file.path!),
-      );
-    }
-
-    final response = await request.send();
-    if (response.statusCode == 200) {
-      final responseBody = await response.stream.bytesToString();
-      return jsonDecode(responseBody)['fileUrl'];
-    } else {
-      return null;
-    }
-  } Future<void> _pickAndAddFiles() async {
-    final result = await FilePicker.platform.pickFiles(allowMultiple: true);
-
-    if (result != null && result.files.isNotEmpty) {
-      setState(() {
-        _selectedFiles.addAll(result.files);
-      });
-
-      FocusScope.of(context).requestFocus(_focusNode); // keep focus on text
-    }
-  }
   Future<void> fetchMessages() async {
     final url = Uri.parse(
-        'http://192.168.20.143:4000/messages?user1=${widget.currentUser}&user2=${widget.otherUser}&currentUser=${widget.currentUser}');
+        'http://192.168.137.145:4000/messages?user1=${widget.currentUser}&user2=${widget.otherUser}&currentUser=${widget.currentUser}');
     try {
       final response = await http.get(url);
+      print('FetchMessages response status: ${response.statusCode}');
+      print('FetchMessages response body: ${response.body}');
+
       if (response.statusCode == 200) {
         final List<dynamic> data = jsonDecode(response.body);
+        print('Parsed messages count: ${data.length}');
+
         setState(() {
           messages = data.map((json) {
+            print('Parsing message: $json');
             return models.Message(
-              id: json['_id'] ?? '', // ✅ FIXED: assign actual Mongo _id
+              id: json['_id'] ?? '',
               sender: json['sender'] ?? 'Unknown',
               receiver: json['receiver'] ?? 'Unknown',
               content: json['content'] ?? '[No Content]',
@@ -270,29 +242,31 @@ void dispose() {
               isGroup: json['isGroup'] ?? false,
               emojis: (json['emojis'] as List<dynamic>?)?.cast<String>() ?? [],
               fileUrl: json['fileUrl'] ?? '',
+              isFile: json['isFile'] ??
+                  json['fileUrl'] != null &&
+                      json['fileUrl'].toString().isNotEmpty,
+              deleted: json['deleted'] ?? false,
+              edited: json['edited'] ?? false,
               readBy: (json['readBy'] as List<dynamic>?)?.cast<String>() ?? [],
               type: json['type'],
               direction: json['direction'],
               duration: json['duration'] is int
                   ? json['duration']
                   : int.tryParse(json['duration']?.toString() ?? ''),
-                  isFile: true,      // or false depending on message type
-  deleted: false,    // initial value for new message
-  edited: false,
             );
           }).toList();
         });
 
-        await _markMessagesAsRead(); // no await since it’s void
+        await _markMessagesAsRead();
 
         WidgetsBinding.instance.addPostFrameCallback((_) {
           _scrollToBottomSmooth();
         });
       } else {
-        debugPrint('Failed to fetch messages: ${response.statusCode}');
+        print('Failed to fetch messages: ${response.statusCode}');
       }
     } catch (error) {
-      debugPrint('Error fetching messages: $error');
+      print('Error fetching messages: $error');
     }
   }
 
@@ -352,38 +326,589 @@ void dispose() {
         lower.endsWith('.bmp') ||
         lower.endsWith('.webp');
   }
-String _formatDuration(int seconds) {
-  final minutes = (seconds ~/ 60).toString().padLeft(2, '0');
-  final secs = (seconds % 60).toString().padLeft(2, '0');
-  return '$minutes:$secs';
-}
- void _handleSend() async {
-    final text = _controller.text.trim();
 
-    if (_selectedFiles.isNotEmpty) {
-      // Upload files one by one
-      for (final file in _selectedFiles) {
-        final fileUrl = await _uploadFile(file);
-        if (fileUrl != null) {
-          _sendMessage(text.isEmpty ? '' : text, fileUrl: fileUrl);
-          // Clear text only after first send to allow sending text with first file
-          // or you can send message for each file separately, or batch send if backend supports.
-        } else {
-          ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(content: Text('Failed to upload file ${file.name}')),
+Widget _buildMessageContent(models.Message msg) {
+  // --- Missed Call ---
+    print('📩 Building message: content="${msg.content}", fileUrl="${msg.fileUrl}", type="${msg.type}"');
+
+  if (msg.type == 'missed_call' && msg.receiver == widget.currentUser) {
+    return Row(
+      mainAxisAlignment: MainAxisAlignment.center,
+      children: const [
+        Icon(Icons.call_missed, color: Colors.red),
+        SizedBox(width: 8),
+        Text(
+          'Missed call',
+          style: TextStyle(color: Colors.red, fontStyle: FontStyle.italic),
+        ),
+      ],
+    );
+  }
+
+  // --- Cancelled Call ---
+  if (msg.type == 'cancelled_call' && msg.sender == widget.currentUser) {
+    return Row(
+      mainAxisAlignment: MainAxisAlignment.center,
+      children: const [
+        Icon(Icons.call_end, color: Colors.orange),
+        SizedBox(width: 8),
+        Text(
+          'Cancelled call',
+          style: TextStyle(color: Colors.orange, fontStyle: FontStyle.italic),
+        ),
+      ],
+    );
+  }
+
+  // --- Call Log ---
+  if (msg.type == 'call_log') {
+    String directionText = '';
+    IconData icon;
+    Color color;
+
+    if (msg.direction == 'outgoing' && msg.sender == widget.currentUser) {
+      directionText = 'Outgoing call';
+      icon = Icons.call_made;
+      color = Colors.green;
+    } else if (msg.direction == 'incoming' && msg.receiver == widget.currentUser) {
+      directionText = 'Incoming call';
+      icon = Icons.call_received;
+      color = Colors.blue;
+    } else {
+      return const SizedBox.shrink();
+    }
+
+    String durationStr = _formatDuration(msg.duration ?? 0);
+    return Row(
+      mainAxisAlignment: MainAxisAlignment.center,
+      children: [
+        Icon(icon, color: color),
+        const SizedBox(width: 8),
+        Text(
+          '$directionText ($durationStr)',
+          style: TextStyle(color: color, fontStyle: FontStyle.italic),
+        ),
+      ],
+    );
+  }
+
+  // --- Handle File or Text or Both ---
+final bool hasFile = msg.fileUrl != null && msg.fileUrl.trim().isNotEmpty;
+  final bool hasText = msg.content.trim().isNotEmpty;
+
+  List<Widget> children = [];
+
+  if (hasFile) {
+    final ext = getFileExtension(msg.fileUrl);
+    final isRemote = _isRemoteFile(msg.fileUrl);
+
+    Widget fileWidget;
+
+    if (['.jpg', '.jpeg', '.png', '.gif', '.bmp', '.webp'].contains(ext)) {
+      fileWidget = ClipRRect(
+        borderRadius: BorderRadius.circular(8),
+        child: isRemote
+            ? Image.network(
+                msg.fileUrl,
+                width: 150,
+                height: 150,
+                fit: BoxFit.cover,
+                loadingBuilder: (context, child, progress) {
+                  if (progress == null) return child;
+                  return SizedBox(
+                    width: 150,
+                    height: 150,
+                    child: Center(
+                      child: CircularProgressIndicator(
+                        value: progress.expectedTotalBytes != null
+                            ? progress.cumulativeBytesLoaded / progress.expectedTotalBytes!
+                            : null,
+                      ),
+                    ),
+                  );
+                },
+                errorBuilder: (context, error, stackTrace) =>
+                    const Text('[Image not available]'),
+              )
+            : Image.file(
+                File(msg.fileUrl),
+                width: 150,
+                height: 150,
+                fit: BoxFit.cover,
+                errorBuilder: (context, error, stackTrace) =>
+                    const Text('[Image file not found]'),
+              ),
+      );
+    }
+
+    else if (['.mp4', '.webm', '.mov', '.mkv'].contains(ext)) {
+      fileWidget = Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          SizedBox(
+            width: 200,
+            height: 150,
+            child: InlineVideoPlayer(videoUrl: msg.fileUrl),
+          ),
+          TextButton.icon(
+            icon: const Icon(Icons.download),
+            label: const Text("Save Video"),
+            onPressed: () async {
+              final savedPath = await saveFileSmart(
+                msg.fileUrl,
+                'chat_video_${DateTime.now().millisecondsSinceEpoch}$ext',
+              );
+              ScaffoldMessenger.of(context).showSnackBar(
+                SnackBar(
+                    content: Text(savedPath != null
+                        ? 'Video saved to $savedPath'
+                        : 'Save failed')),
+              );
+            },
+          ),
+        ],
+      );
+    }
+
+    else if (['.mp3', '.wav', '.aac', '.m4a'].contains(ext)) {
+      fileWidget = Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          InlineAudioPlayer(audioUrl: msg.fileUrl),
+          TextButton.icon(
+            icon: const Icon(Icons.download),
+            label: const Text("Save Audio"),
+            onPressed: () async {
+              final savedPath = await saveFileSmart(
+                msg.fileUrl,
+                'chat_audio_${DateTime.now().millisecondsSinceEpoch}$ext',
+              );
+              ScaffoldMessenger.of(context).showSnackBar(
+                SnackBar(
+                    content: Text(savedPath != null
+                        ? 'Audio saved to $savedPath'
+                        : 'Save failed')),
+              );
+            },
+          ),
+        ],
+      );
+    }
+
+    else {
+      fileWidget = InkWell(
+        onTap: () async {
+          final savedPath = await saveFileSmart(
+            msg.fileUrl,
+            'chat_file_${DateTime.now().millisecondsSinceEpoch}$ext',
           );
-        }
-      }
-      setState(() {
-        _selectedFiles.clear();
-        _controller.clear();
-      });
-    } else if (text.isNotEmpty) {
-      _sendMessage(text);
-      _controller.clear();
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+                content: Text(savedPath != null
+                    ? 'File saved to $savedPath'
+                    : 'Save failed')),
+          );
+        },
+        child: Row(
+          children: const [
+            Icon(Icons.insert_drive_file, color: Colors.blue),
+            SizedBox(width: 8),
+            Text('Download file', style: TextStyle(color: Colors.blue)),
+          ],
+        ),
+      );
+    }
+
+    children.add(fileWidget);
+  }
+
+  if (hasText) {
+    if (children.isNotEmpty) {
+      children.add(const SizedBox(height: 8));
+    }
+    children.add(
+      Text(
+        msg.content.trim(),
+        style: const TextStyle(color: Colors.black87, fontSize: 16),
+      ),
+    );
+  }
+
+  return Column(
+    crossAxisAlignment: CrossAxisAlignment.start,
+    children: children,
+  );
+}
+// Call button handlers
+  String getFileExtension(String urlOrName) {
+    try {
+      final uri = Uri.parse(urlOrName);
+      final segments = uri.pathSegments;
+      if (segments.isEmpty) return '';
+      final lastSegment = segments.last;
+      final dotIndex = lastSegment.lastIndexOf('.');
+      if (dotIndex == -1) return '';
+      return lastSegment.substring(dotIndex).toLowerCase();
+    } catch (_) {
+      return '';
     }
   }
-Widget _buildFilesPreview() {
+
+  Future<String?> _saveFileDialog(String fileUrl) async {
+    try {
+      final fileName =
+          'chat_file_${DateTime.now().millisecondsSinceEpoch}${getFileExtension(fileUrl)}';
+
+      // Ask user where to save the file
+      final savePath = await getSavePath(suggestedName: fileName);
+
+      if (savePath == null) {
+        print('User cancelled save dialog');
+        return null;
+      }
+
+      final dio = Dio();
+      await dio.download(fileUrl, savePath);
+
+      return savePath;
+    } catch (e) {
+      print('Error saving file: $e');
+      return null;
+    }
+  }
+
+  void _onVoiceCallPressed() {
+    if (_isCallScreenOpen) return;
+    _isCallScreenOpen = true;
+    socketService.socket.emit('call_initiate', {
+      'from': widget.currentUser,
+      'to': widget.otherUser,
+      'voiceOnly': true,
+      'callerName': widget.currentUser,
+    });
+
+    Navigator.push(
+      context,
+      MaterialPageRoute(
+        builder: (_) => CallScreen(
+          selfId: widget.currentUser,
+          peerId: widget.otherUser,
+          isCaller: true,
+          voiceOnly: true,
+          callerName: widget.currentUser,
+          socketService: socketService,
+          onCallScreenClosed: () {
+            // Re-register incoming call listener
+            _connectToSocket();
+          },
+        ),
+      ),
+    ).then((_) {
+      _isCallScreenOpen = false;
+      _connectToSocket(); // re-register listeners
+    });
+  }
+
+  void _onVideoCallPressed() {
+    if (_isCallScreenOpen) return;
+    _isCallScreenOpen = true;
+    Navigator.push(
+      context,
+      MaterialPageRoute(
+        builder: (_) => CallScreen(
+          selfId: widget.currentUser,
+          peerId: widget.otherUser,
+          isCaller: true,
+          voiceOnly: false,
+          callerName: widget.currentUser,
+          socketService: socketService,
+        ),
+      ),
+    ).then((_) {
+      _isCallScreenOpen = false;
+      _connectToSocket(); // re-register listeners
+    });
+  }
+
+  Future<bool> requestStoragePermission() async {
+    if (await Permission.manageExternalStorage.isGranted) return true;
+
+    final result = await Permission.manageExternalStorage.request();
+    return result.isGranted;
+  }
+
+// Helper function to save file smartly based on platform
+  Future<String?> saveFileSmart(String url, String fileName) async {
+    if (kIsWeb || Platform.isWindows || Platform.isLinux || Platform.isMacOS) {
+      // Desktop/web: Ask user where to save
+      final savePath = await getSavePath(suggestedName: fileName);
+      if (savePath == null) {
+        print('User cancelled save dialog');
+        return null;
+      }
+      final dio = Dio();
+      await dio.download(url, savePath);
+      return savePath;
+    } else if (Platform.isAndroid) {
+      // Android: Save automatically to public folder
+      return await saveFileToPublicFolder(url, fileName);
+    } else {
+      // Other platforms: Save to app documents dir
+      final dir = await getApplicationDocumentsDirectory();
+      final filePath = '${dir.path}/$fileName';
+      final dio = Dio();
+      await dio.download(url, filePath);
+      return filePath;
+    }
+  }
+
+// Modified saveFileToPublicFolder (your original)
+  Future<String?> saveFileToPublicFolder(String url, String fileName) async {
+    try {
+      final status = await Permission.manageExternalStorage.request();
+      if (!status.isGranted) {
+        print('Permission denied to write to external storage.');
+        return null;
+      }
+
+      String? folderName;
+      if (fileName.endsWith('.jpg') ||
+          fileName.endsWith('.jpeg') ||
+          fileName.endsWith('.png')) {
+        folderName = 'Pictures';
+      } else if (fileName.endsWith('.mp3') || fileName.endsWith('.wav')) {
+        folderName = 'Music';
+      } else if (fileName.endsWith('.mp4') || fileName.endsWith('.webm')) {
+        folderName = 'Movies';
+      } else if (fileName.endsWith('.pdf') || fileName.endsWith('.docx')) {
+        folderName = 'Documents';
+      } else {
+        folderName = 'Download';
+      }
+
+      final dir = Directory('/storage/emulated/0/$folderName/ChatApp');
+      if (!await dir.exists()) {
+        await dir.create(recursive: true);
+      }
+
+      final fullPath = '${dir.path}/$fileName';
+
+      final dio = Dio();
+      await dio.download(url, fullPath);
+
+      print('File saved to $fullPath');
+      return fullPath;
+    } catch (e) {
+      print('❌ Error saving file: $e');
+      return null;
+    }
+  }
+
+  Future<void> _pickAndAddFiles() async {
+    final result = await FilePicker.platform.pickFiles(allowMultiple: true);
+
+    if (result != null && result.files.isNotEmpty) {
+      setState(() {
+        _selectedFiles.addAll(result.files);
+      });
+
+      FocusScope.of(context).requestFocus(_focusNode); // keep focus on text
+    }
+  }
+
+  Future<void> uploadAndSendFile(PlatformFile file) async {
+    final tempId = DateTime.now().millisecondsSinceEpoch.toString();
+
+    final tempMessage = models.Message(
+      id: tempId,
+      sender: widget.currentUser,
+      receiver: widget.otherUser,
+      content: '',
+      timestamp: DateTime.now().toIso8601String(),
+      isGroup: false,
+      emojis: [],
+      fileUrl: kIsWeb ? '' : (file.path ?? ''),
+      readBy: [widget.currentUser],
+    );
+
+    setState(() {
+      messages.add(tempMessage);
+    });
+    _scrollToBottomSmooth();
+
+    try {
+      final request = http.MultipartRequest(
+        'POST',
+        Uri.parse('http://192.168.137.145:4000/upload'),
+      );
+
+      if (kIsWeb && file.bytes != null) {
+        request.files.add(
+          http.MultipartFile.fromBytes('file', file.bytes!,
+              filename: file.name),
+        );
+      } else if (file.path != null) {
+        request.files.add(
+          await http.MultipartFile.fromPath('file', file.path!),
+        );
+      }
+
+      final response = await request.send();
+      final responseBody = await response.stream.bytesToString();
+
+      setState(() {
+        messages.removeWhere((m) => m.id == tempId);
+      });
+
+      if (response.statusCode == 200) {
+        final fileUrl = jsonDecode(responseBody)['fileUrl'];
+        _sendMessage('', fileUrl: fileUrl);
+      } else {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Failed to upload file')),
+        );
+      }
+    } catch (e) {
+      setState(() {
+        messages.removeWhere((m) => m.id == tempId);
+      });
+
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Upload error: $e')),
+      );
+    }
+
+    setState(() {
+      _selectedFiles.remove(file);
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+      print('All messages: ${messages.map((m) => '${m.content} | ${m.fileUrl}').toList()}');
+
+    List<models.Message> filteredMessages =
+        messages.where((msg) => !msg.deleted).toList();
+
+    return Scaffold(
+        appBar: AppBar(
+          title: Row(
+            children: [
+              const CircleAvatar(child: Icon(Icons.person)),
+              const SizedBox(width: 10),
+              Text(
+                widget.otherUser,
+                style: const TextStyle(fontWeight: FontWeight.w600),
+              ),
+            ],
+          ),
+          actions: [
+            IconButton(
+              icon: const Icon(Icons.call, color: Colors.green),
+              tooltip: 'Voice Call',
+              onPressed: _onVoiceCallPressed,
+            ),
+            IconButton(
+              icon: const Icon(Icons.videocam, color: Colors.blue),
+              tooltip: 'Video Call',
+              onPressed: _onVideoCallPressed,
+            ),
+          ],
+        ),
+        body: Column(children: [
+          Expanded(
+            child: ListView.builder(
+              controller: _scrollController,
+              itemCount: filteredMessages.length,
+              padding: const EdgeInsets.symmetric(vertical: 8, horizontal: 12),
+              itemBuilder: (context, index) {
+                final msg = filteredMessages[index];
+                print(
+                    'Building message: ${msg.sender} -> ${msg.receiver}: ${msg.content}');
+                final isMe = msg.sender == widget.currentUser;
+
+                Widget readStatusIcon() {
+                  if (!isMe) return const SizedBox(width: 0);
+                  if (msg.readBy.contains(widget.otherUser)) {
+                    return const Icon(Icons.done_all,
+                        size: 16, color: Colors.green);
+                  } else {
+                    return const Icon(Icons.done, size: 16, color: Colors.grey);
+                  }
+                }
+
+                return GestureDetector(
+                  onLongPress: () {
+                    showDialog(
+                      context: context,
+                      builder: (_) => AlertDialog(
+                        title: const Text('Delete Message?'),
+                        content: const Text(
+                            'Are you sure you want to delete this message?'),
+                        actions: [
+                          TextButton(
+                            onPressed: () => Navigator.of(context).pop(),
+                            child: const Text('Cancel'),
+                          ),
+                          TextButton(
+                            onPressed: () async {
+                              Navigator.of(context).pop();
+                              await _deleteMessage(msg);
+                            },
+                            child: const Text('Delete',
+                                style: TextStyle(color: Colors.red)),
+                          ),
+                        ],
+                      ),
+                    );
+                  },
+                  child: Row(
+                    mainAxisAlignment:
+                        isMe ? MainAxisAlignment.end : MainAxisAlignment.start,
+                    crossAxisAlignment: CrossAxisAlignment.end,
+                    children: [
+                      Container(
+                        margin: const EdgeInsets.symmetric(vertical: 4),
+                        padding: const EdgeInsets.all(12),
+                        constraints: BoxConstraints(
+                          maxWidth: MediaQuery.of(context).size.width * 0.7,
+                        ),
+                        decoration: BoxDecoration(
+                          color: isMe ? Colors.blue[200] : Colors.grey[300],
+                          borderRadius: BorderRadius.only(
+                            topLeft: const Radius.circular(12),
+                            topRight: const Radius.circular(12),
+                            bottomLeft: isMe
+                                ? const Radius.circular(12)
+                                : const Radius.circular(0),
+                            bottomRight: isMe
+                                ? const Radius.circular(0)
+                                : const Radius.circular(12),
+                          ),
+                        ),
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.end,
+                          children: [
+                            _buildMessageContent(msg),
+                            if (isMe)
+                              Padding(
+                                padding: const EdgeInsets.only(top: 4),
+                                child: readStatusIcon(),
+                              ),
+                          ],
+                        ),
+                      ),
+                    ],
+                  ),
+                );
+              },
+            ),
+          ),
+          _chatInputField(),
+        ]));
+  }
+
+  Widget _buildFilesPreview() {
     if (_selectedFiles.isEmpty) return SizedBox.shrink();
 
     return Container(
@@ -395,9 +920,10 @@ Widget _buildFilesPreview() {
         separatorBuilder: (_, __) => const SizedBox(width: 8),
         itemBuilder: (context, index) {
           final file = _selectedFiles[index];
-          final isImage = file.extension?.toLowerCase().contains('png') == true ||
-              file.extension?.toLowerCase().contains('jpg') == true ||
-              file.extension?.toLowerCase().contains('jpeg') == true;
+          final isImage =
+              file.extension?.toLowerCase().contains('png') == true ||
+                  file.extension?.toLowerCase().contains('jpg') == true ||
+                  file.extension?.toLowerCase().contains('jpeg') == true;
 
           return Stack(
             children: [
@@ -442,7 +968,87 @@ Widget _buildFilesPreview() {
     );
   }
 
-Widget _chatInputField() {
+  void _handleSend() async {
+    final text = _controller.text.trim();
+
+    if (_selectedFiles.isNotEmpty) {
+      // Upload files one by one
+      for (final file in _selectedFiles) {
+        final fileUrl = await _uploadFile(file);
+        if (fileUrl != null) {
+          _sendMessage(text.isEmpty ? '' : text, fileUrl: fileUrl);
+          // Clear text only after first send to allow sending text with first file
+          // or you can send message for each file separately, or batch send if backend supports.
+        } else {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(content: Text('Failed to upload file ${file.name}')),
+          );
+        }
+      }
+      setState(() {
+        _selectedFiles.clear();
+        _controller.clear();
+      });
+    } else if (text.isNotEmpty) {
+      _sendMessage(text);
+      _controller.clear();
+    }
+  }
+
+  Future<String?> _uploadFile(PlatformFile file) async {
+    final request = http.MultipartRequest(
+      'POST',
+      Uri.parse('http://192.168.137.145:4000/upload'),
+    );
+
+    if (kIsWeb && file.bytes != null) {
+      request.files.add(
+        http.MultipartFile.fromBytes('file', file.bytes!, filename: file.name),
+      );
+    } else if (file.path != null) {
+      request.files.add(
+        await http.MultipartFile.fromPath('file', file.path!),
+      );
+    }
+
+    final response = await request.send();
+    if (response.statusCode == 200) {
+      final responseBody = await response.stream.bytesToString();
+      return jsonDecode(responseBody)['fileUrl'];
+    } else {
+      return null;
+    }
+  }
+
+  Future<void> _deleteMessage(models.Message message) async {
+    final url = Uri.parse('http://192.168.137.145:4000/messages/${message.id}');
+    try {
+      final response = await http.delete(url, headers: {
+        'Authorization': 'Bearer ${widget.jwtToken}',
+      });
+
+      if (response.statusCode == 200) {
+        setState(() {
+          messages.removeWhere((m) => m.id == message.id);
+        });
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Message deleted')),
+        );
+      } else {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Failed to delete: ${response.statusCode}')),
+        );
+      }
+    } catch (e) {
+      print('Delete error: $e');
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Error deleting message: $e')),
+      );
+    }
+  }
+
+  // Also update _chatInputField() to call new _pickAndAddFiles()
+  Widget _chatInputField() {
     return SafeArea(
       child: Column(
         mainAxisSize: MainAxisSize.min,
@@ -506,653 +1112,17 @@ Widget _chatInputField() {
     );
   }
 
-
- 
-  Widget _buildMessageContent(models.Message msg) {
-    // Missed call
-    if (msg.type == 'missed_call' && msg.receiver == widget.currentUser) {
-      return Row(
-        mainAxisAlignment: MainAxisAlignment.center,
-        children: [
-          Icon(Icons.call_missed, color: Colors.red),
-          const SizedBox(width: 8),
-          Text(
-            'Missed call',
-            style:
-                const TextStyle(color: Colors.red, fontStyle: FontStyle.italic),
-          ),
-        ],
-      );
-    }
-
-    // Cancelled call
-    if (msg.type == 'cancelled_call' && msg.sender == widget.currentUser) {
-      return Row(
-        mainAxisAlignment: MainAxisAlignment.center,
-        children: [
-          Icon(Icons.call_end, color: Colors.orange),
-          const SizedBox(width: 8),
-          Text(
-            'Cancelled call',
-            style: const TextStyle(
-                color: Colors.orange, fontStyle: FontStyle.italic),
-          ),
-        ],
-      );
-    }
-
-    // Call log
-    if (msg.type == 'call_log') {
-      String directionText = '';
-      IconData icon;
-      Color color;
-      if (msg.direction == 'outgoing' && msg.sender == widget.currentUser) {
-        directionText = 'Outgoing call';
-        icon = Icons.call_made;
-        color = Colors.green;
-      } else if (msg.direction == 'incoming' &&
-          msg.receiver == widget.currentUser) {
-        directionText = 'Incoming call';
-        icon = Icons.call_received;
-        color = Colors.blue;
-      } else {
-        return const SizedBox.shrink();
-      }
-
-      String durationStr = _formatDuration(msg.duration ?? 0);
-      return Row(
-        mainAxisAlignment: MainAxisAlignment.center,
-        children: [
-          Icon(icon, color: color),
-          const SizedBox(width: 8),
-          Text(
-            '$directionText ($durationStr)',
-            style: TextStyle(color: color, fontStyle: FontStyle.italic),
-          ),
-        ],
-      );
-    }
-
-    // File-based messages
-// // File-based messages
-if (msg.fileUrl.isNotEmpty) {
-  final ext = getFileExtension(msg.fileUrl);
-  final isRemote = _isRemoteFile(msg.fileUrl);
-
-  Widget fileWidget;
-
-  // --- IMAGE PREVIEW ---
-  if (['.jpg', '.jpeg', '.png', '.gif', '.bmp', '.webp'].contains(ext)) {
-    fileWidget = ClipRRect(
-      borderRadius: BorderRadius.circular(8),
-      child: isRemote
-          ? Image.network(
-              msg.fileUrl,
-              loadingBuilder: (context, child, progress) {
-                if (progress == null) return child;
-                return SizedBox(
-                  width: 150,
-                  height: 150,
-                  child: Center(
-                    child: CircularProgressIndicator(
-                      value: progress.expectedTotalBytes != null
-                          ? progress.cumulativeBytesLoaded /
-                              progress.expectedTotalBytes!
-                          : null,
-                    ),
-                  ),
-                );
-              },
-              errorBuilder: (context, error, stackTrace) =>
-                  const Text('[Image not available]'),
-              width: 150,
-              height: 150,
-              fit: BoxFit.cover,
-            )
-          : Image.file(
-              File(msg.fileUrl),
-              width: 150,
-              height: 150,
-              fit: BoxFit.cover,
-              errorBuilder: (context, error, stackTrace) =>
-                  const Text('[Image file not found]'),
-            ),
-    );
+  String _formatDuration(int seconds) {
+    final minutes = (seconds ~/ 60).toString().padLeft(2, '0');
+    final secs = (seconds % 60).toString().padLeft(2, '0');
+    return '$minutes:$secs';
   }
-
-  // --- VIDEO PREVIEW ---
-  else if (['.mp4', '.webm', '.mov', '.mkv'].contains(ext)) {
-    fileWidget = Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        SizedBox(
-          width: 200,
-          height: 150,
-          child: InlineVideoPlayer(videoUrl: msg.fileUrl),
-        ),
-        TextButton.icon(
-          icon: const Icon(Icons.download),
-          label: const Text("Save Video"),
-          onPressed: () async {
-            final savedPath = await saveFileSmart(
-              msg.fileUrl,
-              'chat_video_${DateTime.now().millisecondsSinceEpoch}$ext',
-            );
-            ScaffoldMessenger.of(context).showSnackBar(
-              SnackBar(content: Text(savedPath != null ? 'Video saved to $savedPath' : 'Save failed')),
-            );
-          },
-        ),
-      ],
-    );
-  }
-
-  // --- AUDIO PREVIEW ---
-  else if (['.mp3', '.wav', '.aac', '.m4a'].contains(ext)) {
-    fileWidget = Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        InlineAudioPlayer(audioUrl: msg.fileUrl),
-        TextButton.icon(
-          icon: const Icon(Icons.download),
-          label: const Text("Save Audio"),
-          onPressed: () async {
-            final savedPath = await saveFileSmart(
-              msg.fileUrl,
-              'chat_audio_${DateTime.now().millisecondsSinceEpoch}$ext',
-            );
-            ScaffoldMessenger.of(context).showSnackBar(
-              SnackBar(content: Text(savedPath != null ? 'Audio saved to $savedPath' : 'Save failed')),
-            );
-          },
-        ),
-      ],
-    );
-  }
-
-  // --- GENERIC FILE DOWNLOAD ---
-  else {
-    fileWidget = InkWell(
-      onTap: () async {
-        final savedPath = await saveFileSmart(
-          msg.fileUrl,
-          'chat_file_${DateTime.now().millisecondsSinceEpoch}$ext',
-        );
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text(savedPath != null ? 'File saved to $savedPath' : 'Save failed')),
-        );
-      },
-      child: Row(
-        children: const [
-          Icon(Icons.insert_drive_file, color: Colors.blue),
-          SizedBox(width: 8),
-          Text('Download file', style: TextStyle(color: Colors.blue)),
-        ],
-      ),
-    );
-  }
-
-  // --- FINAL RETURN ---
-  return Column(
-    crossAxisAlignment: CrossAxisAlignment.start,
-    children: [
-      fileWidget,
-      if (msg.content.trim().isNotEmpty) ...[
-        const SizedBox(height: 8),
-        Text(
-          msg.content,
-          style: const TextStyle(color: Colors.black87, fontSize: 16),
-        ),
-      ],
-    ],
-  );
-}
-
-// --- FALLBACK TEXT MESSAGE ---
-return Text(
-  msg.content,
-  style: const TextStyle(color: Colors.black87, fontSize: 16),
-);
-
-  }
-  // Call button handlers
-String getFileExtension(String urlOrName) {
-  try {
-    final uri = Uri.parse(urlOrName);
-    final segments = uri.pathSegments;
-    if (segments.isEmpty) return '';
-    final lastSegment = segments.last;
-    final dotIndex = lastSegment.lastIndexOf('.');
-    if (dotIndex == -1) return '';
-    return lastSegment.substring(dotIndex).toLowerCase();
-  } catch (_) {
-    return '';
-  }
-}
-Future<String?> _saveFileDialog(String fileUrl) async {
-  try {
-    final fileName = 'chat_file_${DateTime.now().millisecondsSinceEpoch}${getFileExtension(fileUrl)}';
-
-    // Ask user where to save the file
-    final savePath = await getSavePath(suggestedName: fileName);
-
-    if (savePath == null) {
-      print('User cancelled save dialog');
-      return null;
-    }
-
-    final dio = Dio();
-    await dio.download(fileUrl, savePath);
-
-    return savePath;
-  } catch (e) {
-    print('Error saving file: $e');
-    return null;
-  }
-}
-
-
-  void _onVoiceCallPressed() {
-    if (_isCallScreenOpen) return;
-    _isCallScreenOpen = true;
-    socketService.socket.emit('call_initiate', {
-      'from': widget.currentUser,
-      'to': widget.otherUser,
-      'voiceOnly': true,
-      'callerName': widget.currentUser,
-    });
-
-    Navigator.push(
-      context,
-      MaterialPageRoute(
-        builder: (_) => CallScreen(
-          selfId: widget.currentUser,
-          peerId: widget.otherUser,
-          isCaller: true,
-          voiceOnly: true,
-          callerName: widget.currentUser,
-          socketService: socketService,
-          onCallScreenClosed: () {
-            // Re-register incoming call listener
-            _connectToSocket();
-          },
-        ),
-      ),
-    ).then((_) {
-      _isCallScreenOpen = false;
-      _connectToSocket(); // re-register listeners
-    });
-  }
-
-  void _onVideoCallPressed() {
-    if (_isCallScreenOpen) return;
-    _isCallScreenOpen = true;
-    Navigator.push(
-      context,
-      MaterialPageRoute(
-        builder: (_) => CallScreen(
-          selfId: widget.currentUser,
-          peerId: widget.otherUser,
-          isCaller: true,
-          voiceOnly: false,
-          callerName: widget.currentUser,
-          socketService: socketService,
-        ),
-      ),
-    ).then((_) {
-      _isCallScreenOpen = false;
-      _connectToSocket(); // re-register listeners
-    });
-  }
-
-Future<bool> requestStoragePermission() async {
-  if (await Permission.manageExternalStorage.isGranted) return true;
-
-  final result = await Permission.manageExternalStorage.request();
-  return result.isGranted;
-
-
-}
-
-
-// Helper function to save file smartly based on platform
-Future<String?> saveFileSmart(String url, String fileName) async {
-  if (kIsWeb || Platform.isWindows || Platform.isLinux || Platform.isMacOS) {
-    // Desktop/web: Ask user where to save
-    final savePath = await getSavePath(suggestedName: fileName);
-    if (savePath == null) {
-      print('User cancelled save dialog');
-      return null;
-    }
-    final dio = Dio();
-    await dio.download(url, savePath);
-    return savePath;
-  } else if (Platform.isAndroid) {
-    // Android: Save automatically to public folder
-    return await saveFileToPublicFolder(url, fileName);
-  } else {
-    // Other platforms: Save to app documents dir
-    final dir = await getApplicationDocumentsDirectory();
-    final filePath = '${dir.path}/$fileName';
-    final dio = Dio();
-    await dio.download(url, filePath);
-    return filePath;
-  }
-}
-
-// Modified saveFileToPublicFolder (your original)
-Future<String?> saveFileToPublicFolder(String url, String fileName) async {
-  try {
-    final status = await Permission.manageExternalStorage.request();
-    if (!status.isGranted) {
-      print('Permission denied to write to external storage.');
-      return null;
-    }
-
-    String? folderName;
-    if (fileName.endsWith('.jpg') ||
-        fileName.endsWith('.jpeg') ||
-        fileName.endsWith('.png')) {
-      folderName = 'Pictures';
-    } else if (fileName.endsWith('.mp3') || fileName.endsWith('.wav')) {
-      folderName = 'Music';
-    } else if (fileName.endsWith('.mp4') || fileName.endsWith('.webm')) {
-      folderName = 'Movies';
-    } else if (fileName.endsWith('.pdf') || fileName.endsWith('.docx')) {
-      folderName = 'Documents';
-    } else {
-      folderName = 'Download';
-    }
-
-    final dir = Directory('/storage/emulated/0/$folderName/ChatApp');
-    if (!await dir.exists()) {
-      await dir.create(recursive: true);
-    }
-
-    final fullPath = '${dir.path}/$fileName';
-
-    final dio = Dio();
-    await dio.download(url, fullPath);
-
-    print('File saved to $fullPath');
-    return fullPath;
-  } catch (e) {
-    print('❌ Error saving file: $e');
-    return null;
-  }
-}
-
- 
-Future<void> _deleteMessageById(String msgId) async {
-  try {
-    final message = messages.firstWhere((msg) => msg.id == msgId);
-    await _deleteMessageById(msgId);
-  } catch (e) {
-    print('Message with id $msgId not found: $e');
-  }
-}
-
-  
-Future<void> _deleteMessage(models.Message message) async {
-  final url = Uri.parse('http://192.168.20.143:4000/messages/${message.id}');
-  try {
-    final response = await http.delete(url, headers: {
-      'Authorization': 'Bearer ${widget.jwtToken}',
-    });
-
-    if (response.statusCode == 200) {
-      setState(() {
-        messages.removeWhere((m) => m.id == message.id);
-      });
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Message deleted')),
-      );
-    } else {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Failed to delete: ${response.statusCode}')),
-      );
-    }
-  } catch (e) {
-    print('Delete error: $e');
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(content: Text('Error deleting message: $e')),
-    );
-  }
-}
-
-/*Future<void> uploadAndSendFile(PlatformFile file) async {
-  final tempId = DateTime.now().millisecondsSinceEpoch.toString();
-
-  final tempMessage = models.Message(
-    id: tempId,
-    sender: widget.currentUser,
-    receiver: widget.otherUser,
-    content: '',
-    timestamp: DateTime.now().toIso8601String(),
-    isGroup: false,
-    emojis: [],
-    fileUrl: kIsWeb ? '' : (file.path ?? ''),
-    readBy: [widget.currentUser],
-  );
-
-  setState(() {
-    messages.add(tempMessage);
-  });
-  _scrollToBottomSmooth();
-
-  try {
-    final request = http.MultipartRequest(
-      'POST',
-      Uri.parse('http://192.168.20.143:4000/upload'),
-    );
-
-    if (kIsWeb && file.bytes != null) {
-      request.files.add(
-        http.MultipartFile.fromBytes('file', file.bytes!, filename: file.name),
-      );
-    } else if (file.path != null) {
-      request.files.add(
-        await http.MultipartFile.fromPath('file', file.path!),
-      );
-    }
-
-    final response = await request.send();
-    final responseBody = await response.stream.bytesToString();
-
-    setState(() {
-      messages.removeWhere((m) => m.id == tempId);
-    });
-
-    if (response.statusCode == 200) {
-      final fileUrl = jsonDecode(responseBody)['fileUrl'];
-      _sendMessage('', fileUrl: fileUrl);
-    } else {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Failed to upload file')),
-      );
-    }
-  } catch (e) {
-    setState(() {
-      messages.removeWhere((m) => m.id == tempId);
-    });
-
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(content: Text('Upload error: $e')),
-    );
-  }
-
-  setState(() {
-    _selectedFiles.remove(file);
-  });
-}
-*/
-  @override
-  Widget build(BuildContext context) {
-    List<models.Message> filteredMessages = messages.where((msg) {
-      if (msg.type == 'missed_call') {
-        return msg.receiver == widget.currentUser;
-      }
-      if (msg.type == 'cancelled_call') {
-        return msg.sender == widget.currentUser;
-      }
-      return true; // show all other messages
-    }).toList();
-
-return Scaffold(
-  appBar: AppBar(
-    title: Row(
-      children: [
-        const CircleAvatar(child: Icon(Icons.person)),
-        const SizedBox(width: 10),
-        Text(
-          widget.otherUser,
-          style: const TextStyle(fontWeight: FontWeight.w600),
-        ),
-      ],
-    ),
-    actions: [
-      if (isSelectionMode)
-        IconButton(
-          icon: const Icon(Icons.delete),
-          tooltip: 'Delete selected messages',
-          onPressed: () async {
-            final confirm = await showDialog<bool>(
-              context: context,
-              builder: (context) => AlertDialog(
-                title: Text('Delete messages?'),
-                content: Text('Delete ${_selectedMessageIds.length} messages?'),
-                actions: [
-                  TextButton(
-                    onPressed: () => Navigator.pop(context, false),
-                    child: const Text('Cancel'),
-                  ),
-                  TextButton(
-                    onPressed: () => Navigator.pop(context, true),
-                    child: const Text('Delete'),
-                  ),
-                ],
-              ),
-            );
-            if (confirm == true) {
-              for (final msgId in _selectedMessageIds) {
-                await _deleteMessageById(msgId);
-              }
-              setState(() {
-                _selectedMessageIds.clear();
-              });
-            }
-          },
-        ),
-      if (!isSelectionMode) ...[
-        IconButton(
-          icon: const Icon(Icons.call, color: Colors.green),
-          tooltip: 'Voice Call',
-          onPressed: _onVoiceCallPressed,
-        ),
-        IconButton(
-          icon: const Icon(Icons.videocam, color: Colors.blue),
-          tooltip: 'Video Call',
-          onPressed: _onVideoCallPressed,
-        ),
-      ],
-    ],
-  ),
-  body: Column(
-    children: [
-      Expanded(
-        child: ListView.builder(
-          controller: _scrollController,
-          itemCount: filteredMessages.length,
-          padding: const EdgeInsets.symmetric(vertical: 8, horizontal: 12),
-          itemBuilder: (context, index) {
-            final msg = filteredMessages[index];
-            final isMe = msg.sender == widget.currentUser;
-
-            Widget readStatusIcon() {
-              if (!isMe) return const SizedBox.shrink();
-              if (msg.readBy.contains(widget.otherUser)) {
-                return const Icon(Icons.done_all, size: 16, color: Colors.green);
-              } else {
-                return const Icon(Icons.done, size: 16, color: Colors.grey);
-              }
-            }
-
-            final isSelected = _selectedMessageIds.contains(msg.id);
-
-            return GestureDetector(
-              onLongPress: () {
-                setState(() {
-                  if (isSelected) {
-                    _selectedMessageIds.remove(msg.id);
-                  } else {
-                    _selectedMessageIds.add(msg.id);
-                  }
-                });
-              },
-              onTap: () {
-                if (isSelectionMode) {
-                  setState(() {
-                    if (isSelected) {
-                      _selectedMessageIds.remove(msg.id);
-                    } else {
-                      _selectedMessageIds.add(msg.id);
-                    }
-                  });
-                } else {
-                  // Normal tap behavior if needed
-                }
-              },
-              child: Container(
-                margin: const EdgeInsets.symmetric(vertical: 4),
-                padding: const EdgeInsets.all(12),
-                constraints: BoxConstraints(
-                  maxWidth: MediaQuery.of(context).size.width * 0.7,
-                ),
-                decoration: BoxDecoration(
-                  color: isSelected
-                      ? Colors.blue.withOpacity(0.4)
-                      : (isMe ? Colors.blue[200] : Colors.grey[300]),
-borderRadius: BorderRadius.only(
-  topLeft: const Radius.circular(12),
-  topRight: const Radius.circular(12),
-  bottomLeft: isMe ? const Radius.circular(12) : const Radius.circular(0),
-  bottomRight: isMe ? const Radius.circular(12) : const Radius.circular(0),
-),
-
-                ),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.end,
-                  children: [
-                    _buildMessageContent(msg),
-                    if (isMe)
-                      Padding(
-                        padding: const EdgeInsets.only(top: 4),
-                        child: readStatusIcon(),
-                      ),
-                  ],
-                ),
-              ),
-            );
-          },
-        ),
-      ),
-      _chatInputField(),
-    ],
-  ),
-);
- 
-
-  // Also update _chatInputField() to call new _pickAndAddFiles()
- 
-
-}
-
 }
 
 class InlineVideoPlayer extends StatefulWidget {
   final String videoUrl;
 
-  const InlineVideoPlayer({Key? key, required this.videoUrl}) : super(key: key);
+  const InlineVideoPlayer({super.key, required this.videoUrl});
 
   @override
   State<InlineVideoPlayer> createState() => _InlineVideoPlayerState();
@@ -1198,28 +1168,26 @@ class _InlineVideoPlayerState extends State<InlineVideoPlayer> {
                   child: VideoPlayer(_controller),
                 ),
                 if (!_controller.value.isPlaying)
-                  const Icon(Icons.play_circle_fill, size: 64, color: Colors.white),
+                  const Icon(Icons.play_circle_fill,
+                      size: 64, color: Colors.white),
               ],
             ),
           )
         : const Center(child: CircularProgressIndicator());
-        
   }
-  
 }
-
 
 class InlineAudioPlayer extends StatefulWidget {
   final String audioUrl;
 
-  const InlineAudioPlayer({required this.audioUrl, Key? key}) : super(key: key);
+  const InlineAudioPlayer({required this.audioUrl, super.key});
 
   @override
   _InlineAudioPlayerState createState() => _InlineAudioPlayerState();
 }
 
 class _InlineAudioPlayerState extends State<InlineAudioPlayer> {
-late final ap.AudioPlayer _audioPlayer;
+  late final ap.AudioPlayer _audioPlayer;
   bool _isPlaying = false;
 
   @override
@@ -1237,19 +1205,19 @@ late final ap.AudioPlayer _audioPlayer;
     super.dispose();
   }
 
-Future<void> _togglePlayPause() async {
-  try {
-    if (_isPlaying) {
-      await _audioPlayer.pause();
-    } else {
-      await _audioPlayer.play(ap.UrlSource(widget.audioUrl));
+  Future<void> _togglePlayPause() async {
+    try {
+      if (_isPlaying) {
+        await _audioPlayer.pause();
+      } else {
+        await _audioPlayer.play(ap.UrlSource(widget.audioUrl));
+      }
+      setState(() => _isPlaying = !_isPlaying);
+    } catch (e) {
+      print('Audio play error: $e');
+      // Optionally show snackbar or UI error
     }
-    setState(() => _isPlaying = !_isPlaying);
-  } catch (e) {
-    print('Audio play error: $e');
-    // Optionally show snackbar or UI error
   }
-}
 
   @override
   Widget build(BuildContext context) {
@@ -1261,4 +1229,5 @@ Future<void> _togglePlayPause() async {
       ),
       onPressed: _togglePlayPause,
     );
-  }}
+  }
+}

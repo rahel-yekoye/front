@@ -8,12 +8,14 @@ class Message {
   final List<String> emojis;
   final String fileUrl;
   final List<String> readBy;
-  final bool isFile;
-  final bool deleted;
-  final bool edited;
   final String? type;
   final String? direction;
   final int? duration;
+
+  // Add these fields
+  final bool isFile;
+  final bool deleted;
+  final bool edited;
 
   Message({
     required this.id,
@@ -24,54 +26,36 @@ class Message {
     required this.isGroup,
     required this.emojis,
     required this.fileUrl,
-    this.readBy = const [],
-    required this.isFile,
-    required this.deleted,
-    required this.edited,
+    required this.readBy,
     this.type,
     this.direction,
     this.duration,
+
+    // ✅ Make them optional with defaults
+    this.isFile = false,
+    this.deleted = false,
+    this.edited = false,
   });
 
   factory Message.fromJson(Map<String, dynamic> json) {
     return Message(
-      id: json['id'] ?? '',
-      sender: json['sender'] ?? '',
-      receiver: json['receiver'] ?? '',
+      id: json['_id'] ?? '',
+      sender: json['sender'] ?? 'Unknown',
+      receiver: json['receiver'] ?? 'Unknown',
       content: json['content'] ?? '',
-      timestamp: json['timestamp'] ?? '',
+      timestamp: json['timestamp'] ?? DateTime.now().toIso8601String(),
       isGroup: json['isGroup'] ?? false,
       emojis: (json['emojis'] as List<dynamic>?)?.cast<String>() ?? [],
       fileUrl: json['fileUrl'] ?? '',
       readBy: (json['readBy'] as List<dynamic>?)?.cast<String>() ?? [],
-      isFile: json['isFile'] ?? false,
-      deleted: json['deleted'] ?? false,
-      edited: json['edited'] ?? false,
       type: json['type'],
       direction: json['direction'],
       duration: json['duration'] is int
           ? json['duration']
           : int.tryParse(json['duration']?.toString() ?? ''),
+      isFile: json['fileUrl'] != null && json['fileUrl'] != '',
+      deleted: json['deleted'] ?? false,
+      edited: json['edited'] ?? false,
     );
-  }
-
-  Map<String, dynamic> toJson() {
-    return {
-      'id': id,
-      'sender': sender,
-      'receiver': receiver,
-      'content': content,
-      'timestamp': timestamp,
-      'isGroup': isGroup,
-      'emojis': emojis,
-      'fileUrl': fileUrl,
-      'readBy': readBy,
-      'isFile': isFile,
-      'deleted': deleted,
-      'edited': edited,
-      'type': type,
-      'direction': direction,
-      'duration': duration,
-    };
   }
 }
