@@ -52,6 +52,9 @@ bool _isRemoteFile(String fileUrl) {
 }
 Map<String, VideoPlayerController> _videoControllers = {};
 Map<String, ap.AudioPlayer> _audioPlayers = {};
+Set<String> _selectedMessageIds = {};
+bool get isSelectionMode => _selectedMessageIds.isNotEmpty;
+
 @override
 void dispose() {
   for (var controller in _videoControllers.values) {
@@ -215,7 +218,40 @@ void dispose() {
       print('[SOCKET EVENT] $event: $data');
     });
   }
+  Future<String?> _uploadFile(PlatformFile file) async {
+    final request = http.MultipartRequest(
+      'POST',
+      Uri.parse('http://192.168.20.143:4000/upload'),
+    );
 
+    if (kIsWeb && file.bytes != null) {
+      request.files.add(
+        http.MultipartFile.fromBytes('file', file.bytes!, filename: file.name),
+      );
+    } else if (file.path != null) {
+      request.files.add(
+        await http.MultipartFile.fromPath('file', file.path!),
+      );
+    }
+
+    final response = await request.send();
+    if (response.statusCode == 200) {
+      final responseBody = await response.stream.bytesToString();
+      return jsonDecode(responseBody)['fileUrl'];
+    } else {
+      return null;
+    }
+  } Future<void> _pickAndAddFiles() async {
+    final result = await FilePicker.platform.pickFiles(allowMultiple: true);
+
+    if (result != null && result.files.isNotEmpty) {
+      setState(() {
+        _selectedFiles.addAll(result.files);
+      });
+
+      FocusScope.of(context).requestFocus(_focusNode); // keep focus on text
+    }
+  }
   Future<void> fetchMessages() async {
     final url = Uri.parse(
         'http://192.168.20.143:4000/messages?user1=${widget.currentUser}&user2=${widget.otherUser}&currentUser=${widget.currentUser}');
@@ -240,6 +276,9 @@ void dispose() {
               duration: json['duration'] is int
                   ? json['duration']
                   : int.tryParse(json['duration']?.toString() ?? ''),
+                  isFile: true,      // or false depending on message type
+  deleted: false,    // initial value for new message
+  edited: false,
             );
           }).toList();
         });
@@ -313,7 +352,162 @@ void dispose() {
         lower.endsWith('.bmp') ||
         lower.endsWith('.webp');
   }
+String _formatDuration(int seconds) {
+  final minutes = (seconds ~/ 60).toString().padLeft(2, '0');
+  final secs = (seconds % 60).toString().padLeft(2, '0');
+  return '$minutes:$secs';
+}
+ void _handleSend() async {
+    final text = _controller.text.trim();
 
+    if (_selectedFiles.isNotEmpty) {
+      // Upload files one by one
+      for (final file in _selectedFiles) {
+        final fileUrl = await _uploadFile(file);
+        if (fileUrl != null) {
+          _sendMessage(text.isEmpty ? '' : text, fileUrl: fileUrl);
+          // Clear text only after first send to allow sending text with first file
+          // or you can send message for each file separately, or batch send if backend supports.
+        } else {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(content: Text('Failed to upload file ${file.name}')),
+          );
+        }
+      }
+      setState(() {
+        _selectedFiles.clear();
+        _controller.clear();
+      });
+    } else if (text.isNotEmpty) {
+      _sendMessage(text);
+      _controller.clear();
+    }
+  }
+Widget _buildFilesPreview() {
+    if (_selectedFiles.isEmpty) return SizedBox.shrink();
+
+    return Container(
+      margin: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+      height: 80,
+      child: ListView.separated(
+        scrollDirection: Axis.horizontal,
+        itemCount: _selectedFiles.length,
+        separatorBuilder: (_, __) => const SizedBox(width: 8),
+        itemBuilder: (context, index) {
+          final file = _selectedFiles[index];
+          final isImage = file.extension?.toLowerCase().contains('png') == true ||
+              file.extension?.toLowerCase().contains('jpg') == true ||
+              file.extension?.toLowerCase().contains('jpeg') == true;
+
+          return Stack(
+            children: [
+              Container(
+                width: 70,
+                decoration: BoxDecoration(
+                  color: Colors.grey[300],
+                  borderRadius: BorderRadius.circular(8),
+                ),
+                child: isImage && kIsWeb && file.bytes != null
+                    ? Image.memory(file.bytes!, fit: BoxFit.cover)
+                    : Center(
+                        child: Icon(Icons.insert_drive_file, size: 40),
+                      ),
+              ),
+              Positioned(
+                right: 0,
+                top: 0,
+                child: GestureDetector(
+                  onTap: () {
+                    setState(() {
+                      _selectedFiles.removeAt(index);
+                    });
+                  },
+                  child: Container(
+                    decoration: BoxDecoration(
+                      color: Colors.black54,
+                      shape: BoxShape.circle,
+                    ),
+                    child: const Icon(
+                      Icons.close,
+                      size: 20,
+                      color: Colors.white,
+                    ),
+                  ),
+                ),
+              )
+            ],
+          );
+        },
+      ),
+    );
+  }
+
+Widget _chatInputField() {
+    return SafeArea(
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          _buildFilesPreview(),
+          Row(
+            children: [
+              IconButton(
+                icon: Icon(
+                  _showEmojiPicker ? Icons.keyboard : Icons.emoji_emotions,
+                ),
+                onPressed: () {
+                  FocusScope.of(context).unfocus();
+                  setState(() {
+                    _showEmojiPicker = !_showEmojiPicker;
+                  });
+                },
+              ),
+              IconButton(
+                icon: const Icon(Icons.attach_file),
+                onPressed: _pickAndAddFiles, // <-- changed here
+              ),
+              Expanded(
+                child: TextField(
+                  controller: _controller,
+                  focusNode: _focusNode,
+                  textInputAction: TextInputAction.send,
+                  decoration: InputDecoration(
+                    hintText: 'Type your message...',
+                    filled: true,
+                    fillColor: Colors.grey[100],
+                    border: OutlineInputBorder(
+                      borderRadius: BorderRadius.circular(20),
+                      borderSide: BorderSide.none,
+                    ),
+                    contentPadding: const EdgeInsets.symmetric(horizontal: 16),
+                  ),
+                  onSubmitted: (_) => _handleSend(),
+                ),
+              ),
+              IconButton(
+                icon: const Icon(Icons.send, color: Colors.blue),
+                onPressed: _handleSend,
+              ),
+            ],
+          ),
+          if (_showEmojiPicker)
+            SizedBox(
+              height: 250,
+              child: EmojiPicker(
+                onEmojiSelected: (category, emoji) {
+                  _controller.text += emoji.emoji;
+                  _controller.selection = TextSelection.fromPosition(
+                    TextPosition(offset: _controller.text.length),
+                  );
+                },
+              ),
+            ),
+        ],
+      ),
+    );
+  }
+
+
+ 
   Widget _buildMessageContent(models.Message msg) {
     // Missed call
     if (msg.type == 'missed_call' && msg.receiver == widget.currentUser) {
@@ -688,19 +882,45 @@ Future<String?> saveFileToPublicFolder(String url, String fileName) async {
   }
 }
 
-  Future<void> _pickAndAddFiles() async {
-    final result = await FilePicker.platform.pickFiles(allowMultiple: true);
-
-    if (result != null && result.files.isNotEmpty) {
-      setState(() {
-        _selectedFiles.addAll(result.files);
-      });
-
-      FocusScope.of(context).requestFocus(_focusNode); // keep focus on text
-    }
+ 
+Future<void> _deleteMessageById(String msgId) async {
+  try {
+    final message = messages.firstWhere((msg) => msg.id == msgId);
+    await _deleteMessageById(msgId);
+  } catch (e) {
+    print('Message with id $msgId not found: $e');
   }
+}
 
-Future<void> uploadAndSendFile(PlatformFile file) async {
+  
+Future<void> _deleteMessage(models.Message message) async {
+  final url = Uri.parse('http://192.168.20.143:4000/messages/${message.id}');
+  try {
+    final response = await http.delete(url, headers: {
+      'Authorization': 'Bearer ${widget.jwtToken}',
+    });
+
+    if (response.statusCode == 200) {
+      setState(() {
+        messages.removeWhere((m) => m.id == message.id);
+      });
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Message deleted')),
+      );
+    } else {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Failed to delete: ${response.statusCode}')),
+      );
+    }
+  } catch (e) {
+    print('Delete error: $e');
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text('Error deleting message: $e')),
+    );
+  }
+}
+
+/*Future<void> uploadAndSendFile(PlatformFile file) async {
   final tempId = DateTime.now().millisecondsSinceEpoch.toString();
 
   final tempMessage = models.Message(
@@ -765,7 +985,7 @@ Future<void> uploadAndSendFile(PlatformFile file) async {
     _selectedFiles.remove(file);
   });
 }
-
+*/
   @override
   Widget build(BuildContext context) {
     List<models.Message> filteredMessages = messages.where((msg) {
@@ -778,286 +998,155 @@ Future<void> uploadAndSendFile(PlatformFile file) async {
       return true; // show all other messages
     }).toList();
 
-    return Scaffold(
-      appBar: AppBar(
-        title: Row(
-          children: [
-            const CircleAvatar(child: Icon(Icons.person)),
-            const SizedBox(width: 10),
-            Text(
-              widget.otherUser,
-              style: const TextStyle(fontWeight: FontWeight.w600),
-            ),
-          ],
+return Scaffold(
+  appBar: AppBar(
+    title: Row(
+      children: [
+        const CircleAvatar(child: Icon(Icons.person)),
+        const SizedBox(width: 10),
+        Text(
+          widget.otherUser,
+          style: const TextStyle(fontWeight: FontWeight.w600),
         ),
-        actions: [
-          IconButton(
-            icon: const Icon(Icons.call, color: Colors.green),
-            tooltip: 'Voice Call',
-            onPressed: _onVoiceCallPressed,
-          ),
-          IconButton(
-            icon: const Icon(Icons.videocam, color: Colors.blue),
-            tooltip: 'Video Call',
-            onPressed: _onVideoCallPressed,
-          ),
-        ],
-      ),
-      body: Column(
-        children: [
-          Expanded(
-            child: ListView.builder(
-              controller: _scrollController,
-              itemCount: filteredMessages.length,
-              padding: const EdgeInsets.symmetric(vertical: 8, horizontal: 12),
-              itemBuilder: (context, index) {
-                final msg = filteredMessages[index];
-                print(
-                    'Building message: ${msg.sender} -> ${msg.receiver}: ${msg.content}');
-                final isMe = msg.sender == widget.currentUser;
+      ],
+    ),
+    actions: [
+      if (isSelectionMode)
+        IconButton(
+          icon: const Icon(Icons.delete),
+          tooltip: 'Delete selected messages',
+          onPressed: () async {
+            final confirm = await showDialog<bool>(
+              context: context,
+              builder: (context) => AlertDialog(
+                title: Text('Delete messages?'),
+                content: Text('Delete ${_selectedMessageIds.length} messages?'),
+                actions: [
+                  TextButton(
+                    onPressed: () => Navigator.pop(context, false),
+                    child: const Text('Cancel'),
+                  ),
+                  TextButton(
+                    onPressed: () => Navigator.pop(context, true),
+                    child: const Text('Delete'),
+                  ),
+                ],
+              ),
+            );
+            if (confirm == true) {
+              for (final msgId in _selectedMessageIds) {
+                await _deleteMessageById(msgId);
+              }
+              setState(() {
+                _selectedMessageIds.clear();
+              });
+            }
+          },
+        ),
+      if (!isSelectionMode) ...[
+        IconButton(
+          icon: const Icon(Icons.call, color: Colors.green),
+          tooltip: 'Voice Call',
+          onPressed: _onVoiceCallPressed,
+        ),
+        IconButton(
+          icon: const Icon(Icons.videocam, color: Colors.blue),
+          tooltip: 'Video Call',
+          onPressed: _onVideoCallPressed,
+        ),
+      ],
+    ],
+  ),
+  body: Column(
+    children: [
+      Expanded(
+        child: ListView.builder(
+          controller: _scrollController,
+          itemCount: filteredMessages.length,
+          padding: const EdgeInsets.symmetric(vertical: 8, horizontal: 12),
+          itemBuilder: (context, index) {
+            final msg = filteredMessages[index];
+            final isMe = msg.sender == widget.currentUser;
 
-                // The entire message row now includes:
-                //  - Left icon (read/unread) only for sender's messages
-                //  - Message bubble aligned right or left
+            Widget readStatusIcon() {
+              if (!isMe) return const SizedBox.shrink();
+              if (msg.readBy.contains(widget.otherUser)) {
+                return const Icon(Icons.done_all, size: 16, color: Colors.green);
+              } else {
+                return const Icon(Icons.done, size: 16, color: Colors.grey);
+              }
+            }
 
-                Widget readStatusIcon() {
-                  if (!isMe) return const SizedBox(width: 0);
-                  if (msg.readBy.contains(widget.otherUser)) {
-                    return const Icon(Icons.done_all,
-                        size: 16, color: Colors.green);
+            final isSelected = _selectedMessageIds.contains(msg.id);
+
+            return GestureDetector(
+              onLongPress: () {
+                setState(() {
+                  if (isSelected) {
+                    _selectedMessageIds.remove(msg.id);
                   } else {
-                    return const Icon(Icons.done, size: 16, color: Colors.grey);
+                    _selectedMessageIds.add(msg.id);
                   }
+                });
+              },
+              onTap: () {
+                if (isSelectionMode) {
+                  setState(() {
+                    if (isSelected) {
+                      _selectedMessageIds.remove(msg.id);
+                    } else {
+                      _selectedMessageIds.add(msg.id);
+                    }
+                  });
+                } else {
+                  // Normal tap behavior if needed
                 }
+              },
+              child: Container(
+                margin: const EdgeInsets.symmetric(vertical: 4),
+                padding: const EdgeInsets.all(12),
+                constraints: BoxConstraints(
+                  maxWidth: MediaQuery.of(context).size.width * 0.7,
+                ),
+                decoration: BoxDecoration(
+                  color: isSelected
+                      ? Colors.blue.withOpacity(0.4)
+                      : (isMe ? Colors.blue[200] : Colors.grey[300]),
+borderRadius: BorderRadius.only(
+  topLeft: const Radius.circular(12),
+  topRight: const Radius.circular(12),
+  bottomLeft: isMe ? const Radius.circular(12) : const Radius.circular(0),
+  bottomRight: isMe ? const Radius.circular(12) : const Radius.circular(0),
+),
 
-                return Row(
-                  mainAxisAlignment:
-                      isMe ? MainAxisAlignment.end : MainAxisAlignment.start,
+                ),
+                child: Column(
                   crossAxisAlignment: CrossAxisAlignment.end,
                   children: [
-                    Container(
-                      margin: const EdgeInsets.symmetric(vertical: 4),
-                      padding: const EdgeInsets.all(12),
-                      constraints: BoxConstraints(
-                        maxWidth: MediaQuery.of(context).size.width * 0.7,
+                    _buildMessageContent(msg),
+                    if (isMe)
+                      Padding(
+                        padding: const EdgeInsets.only(top: 4),
+                        child: readStatusIcon(),
                       ),
-                      decoration: BoxDecoration(
-                        color: isMe ? Colors.blue[200] : Colors.grey[300],
-                        borderRadius: BorderRadius.only(
-                          topLeft: const Radius.circular(12),
-                          topRight: const Radius.circular(12),
-                          bottomLeft: isMe
-                              ? const Radius.circular(12)
-                              : const Radius.circular(0),
-                          bottomRight: isMe
-                              ? const Radius.circular(0)
-                              : const Radius.circular(12),
-                        ),
-                      ),
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.end,
-                        children: [
-                          _buildMessageContent(msg),
-                          if (isMe)
-                            Padding(
-                              padding: const EdgeInsets.only(top: 4),
-                              child: readStatusIcon(),
-                            ),
-                        ],
-                      ),
-                    ),
                   ],
-                );
-              },
-            ),
-          ),
-          _chatInputField(),
-        ],
-      ),
-    );
-  }
-  Widget _buildFilesPreview() {
-    if (_selectedFiles.isEmpty) return SizedBox.shrink();
-
-    return Container(
-      margin: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
-      height: 80,
-      child: ListView.separated(
-        scrollDirection: Axis.horizontal,
-        itemCount: _selectedFiles.length,
-        separatorBuilder: (_, __) => const SizedBox(width: 8),
-        itemBuilder: (context, index) {
-          final file = _selectedFiles[index];
-          final isImage = file.extension?.toLowerCase().contains('png') == true ||
-              file.extension?.toLowerCase().contains('jpg') == true ||
-              file.extension?.toLowerCase().contains('jpeg') == true;
-
-          return Stack(
-            children: [
-              Container(
-                width: 70,
-                decoration: BoxDecoration(
-                  color: Colors.grey[300],
-                  borderRadius: BorderRadius.circular(8),
                 ),
-                child: isImage && kIsWeb && file.bytes != null
-                    ? Image.memory(file.bytes!, fit: BoxFit.cover)
-                    : Center(
-                        child: Icon(Icons.insert_drive_file, size: 40),
-                      ),
               ),
-              Positioned(
-                right: 0,
-                top: 0,
-                child: GestureDetector(
-                  onTap: () {
-                    setState(() {
-                      _selectedFiles.removeAt(index);
-                    });
-                  },
-                  child: Container(
-                    decoration: BoxDecoration(
-                      color: Colors.black54,
-                      shape: BoxShape.circle,
-                    ),
-                    child: const Icon(
-                      Icons.close,
-                      size: 20,
-                      color: Colors.white,
-                    ),
-                  ),
-                ),
-              )
-            ],
-          );
-        },
+            );
+          },
+        ),
       ),
-    );
-  }
-
-
-  void _handleSend() async {
-    final text = _controller.text.trim();
-
-    if (_selectedFiles.isNotEmpty) {
-      // Upload files one by one
-      for (final file in _selectedFiles) {
-        final fileUrl = await _uploadFile(file);
-        if (fileUrl != null) {
-          _sendMessage(text.isEmpty ? '' : text, fileUrl: fileUrl);
-          // Clear text only after first send to allow sending text with first file
-          // or you can send message for each file separately, or batch send if backend supports.
-        } else {
-          ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(content: Text('Failed to upload file ${file.name}')),
-          );
-        }
-      }
-      setState(() {
-        _selectedFiles.clear();
-        _controller.clear();
-      });
-    } else if (text.isNotEmpty) {
-      _sendMessage(text);
-      _controller.clear();
-    }
-  }
-  Future<String?> _uploadFile(PlatformFile file) async {
-    final request = http.MultipartRequest(
-      'POST',
-      Uri.parse('http://192.168.20.143:4000/upload'),
-    );
-
-    if (kIsWeb && file.bytes != null) {
-      request.files.add(
-        http.MultipartFile.fromBytes('file', file.bytes!, filename: file.name),
-      );
-    } else if (file.path != null) {
-      request.files.add(
-        await http.MultipartFile.fromPath('file', file.path!),
-      );
-    }
-
-    final response = await request.send();
-    if (response.statusCode == 200) {
-      final responseBody = await response.stream.bytesToString();
-      return jsonDecode(responseBody)['fileUrl'];
-    } else {
-      return null;
-    }
-  }
+      _chatInputField(),
+    ],
+  ),
+);
+ 
 
   // Also update _chatInputField() to call new _pickAndAddFiles()
-  Widget _chatInputField() {
-    return SafeArea(
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          _buildFilesPreview(),
-          Row(
-            children: [
-              IconButton(
-                icon: Icon(
-                  _showEmojiPicker ? Icons.keyboard : Icons.emoji_emotions,
-                ),
-                onPressed: () {
-                  FocusScope.of(context).unfocus();
-                  setState(() {
-                    _showEmojiPicker = !_showEmojiPicker;
-                  });
-                },
-              ),
-              IconButton(
-                icon: const Icon(Icons.attach_file),
-                onPressed: _pickAndAddFiles, // <-- changed here
-              ),
-              Expanded(
-                child: TextField(
-                  controller: _controller,
-                  focusNode: _focusNode,
-                  textInputAction: TextInputAction.send,
-                  decoration: InputDecoration(
-                    hintText: 'Type your message...',
-                    filled: true,
-                    fillColor: Colors.grey[100],
-                    border: OutlineInputBorder(
-                      borderRadius: BorderRadius.circular(20),
-                      borderSide: BorderSide.none,
-                    ),
-                    contentPadding: const EdgeInsets.symmetric(horizontal: 16),
-                  ),
-                  onSubmitted: (_) => _handleSend(),
-                ),
-              ),
-              IconButton(
-                icon: const Icon(Icons.send, color: Colors.blue),
-                onPressed: _handleSend,
-              ),
-            ],
-          ),
-          if (_showEmojiPicker)
-            SizedBox(
-              height: 250,
-              child: EmojiPicker(
-                onEmojiSelected: (category, emoji) {
-                  _controller.text += emoji.emoji;
-                  _controller.selection = TextSelection.fromPosition(
-                    TextPosition(offset: _controller.text.length),
-                  );
-                },
-              ),
-            ),
-        ],
-      ),
-    );
-  }
+ 
 
-  String _formatDuration(int seconds) {
-    final minutes = (seconds ~/ 60).toString().padLeft(2, '0');
-    final secs = (seconds % 60).toString().padLeft(2, '0');
-    return '$minutes:$secs';
-  }
-  
+}
+
 }
 
 class InlineVideoPlayer extends StatefulWidget {
@@ -1172,5 +1261,4 @@ Future<void> _togglePlayPause() async {
       ),
       onPressed: _togglePlayPause,
     );
-  }
-}
+  }}

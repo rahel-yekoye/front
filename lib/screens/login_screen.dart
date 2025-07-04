@@ -21,7 +21,7 @@ class _LoginScreenState extends State<LoginScreen> {
     setState(() => isLoading = true);
 
     try {
-      final url = Uri.parse('http://192.168.20.143:4000/login');
+      final url = Uri.parse('http://192.168.137.145:4000/login');
       print('Sending login request to: $url');
       print('Request body: ${jsonEncode({'email': email, 'password': password})}');
 

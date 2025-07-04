@@ -30,7 +30,7 @@ class _SearchScreenState extends State<SearchScreen> {
 
     try {
       final response = await http.get(
-        Uri.parse('http://192.168.20.143:4000/search?phoneNumber=$phone'),
+        Uri.parse('http://192.168.137.145:4000/search?phoneNumber=$phone'),
         headers: {'Authorization': 'Bearer ${widget.jwtToken}'},
       );
 

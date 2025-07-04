@@ -42,7 +42,7 @@ class SocketService {
 
     final completer = Completer<void>();
 
-    _socket = IO.io('http://192.168.20.143:4000', <String, dynamic>{
+    _socket = IO.io('http://192.168.137.145:4000', <String, dynamic>{
       'transports': ['websocket'],
       'autoConnect': false,
     });

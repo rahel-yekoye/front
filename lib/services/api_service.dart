@@ -4,7 +4,7 @@ import '../models/message.dart';
 
 
 class ApiService {
-static const String baseUrl = 'http://192.168.20.143:4000';
+static const String baseUrl = 'http://192.168.137.145:4000';
 
 
   static Future<bool> sendMessage(String sender, String receiver, String content) async {
