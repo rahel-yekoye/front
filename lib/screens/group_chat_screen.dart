@@ -172,7 +172,7 @@ void _pickAttachment() async {
   }
 
   void _connectToSocket() {
-    socket = IO.io('http://192.168.20.145:4000', <String, dynamic>{
+    socket = IO.io('http://192.168.137.145:4000', <String, dynamic>{
       'transports': ['websocket'],
       'autoConnect': false,
       'extraHeaders': {'Authorization': 'Bearer ${widget.jwtToken}'},
@@ -520,8 +520,12 @@ Future<File?> _downloadFile(String url) async {
   }
 
   Widget _buildMessageItem(Map<String, dynamic> msg) {
+  final messageId = msg['id'] ?? '';
+  if (messageId.isEmpty) {
+    print('! Skipping message without valid ID: ${msg['content'] ?? ''}');
+    return SizedBox.shrink(); // Skip rendering this message
+  }
     final isSender = msg['sender'] == widget.currentUser;
-    final messageId = msg['id'] ?? '';
     final formattedTime = msg['timestamp'] != null
         ? DateFormat('hh:mm a').format(DateTime.parse(msg['timestamp']))
         : '';

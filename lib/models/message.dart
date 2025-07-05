@@ -11,8 +11,6 @@ class Message {
   final String? type;
   final String? direction;
   final int? duration;
-
-  // Add these fields
   final bool isFile;
   final bool deleted;
   final bool edited;
@@ -30,16 +28,28 @@ class Message {
     this.type,
     this.direction,
     this.duration,
-
-    // ✅ Make them optional with defaults
     this.isFile = false,
     this.deleted = false,
     this.edited = false,
   });
 
   factory Message.fromJson(Map<String, dynamic> json) {
+    String idString;
+
+    final idValue = json['id'];
+    if (idValue == null) {
+      idString = '';
+    } else if (idValue is String) {
+      idString = idValue;
+    } else {
+      // Handle cases like ObjectId("...")
+      final raw = idValue.toString();
+      final match = RegExp(r'ObjectId\("?(.*?)"?\)').firstMatch(raw);
+      idString = match != null ? match.group(1)! : raw;
+    }
+
     return Message(
-      id: json['_id'] ?? '',
+      id: idString,
       sender: json['sender'] ?? 'Unknown',
       receiver: json['receiver'] ?? 'Unknown',
       content: json['content'] ?? '',

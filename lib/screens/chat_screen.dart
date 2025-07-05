@@ -51,9 +51,13 @@ class _ChatScreenState extends State<ChatScreen> {
     return fileUrl.startsWith('http://') || fileUrl.startsWith('https://');
   }
 
+  List<models.Message> filteredMessages =
+      []; // The list you show in UI (possibly filtered or same as messages)
+
   final Map<String, VideoPlayerController> _videoControllers = {};
   final Map<String, ap.AudioPlayer> _audioPlayers = {};
-
+  Set<String> selectedMessageIds = {};
+  bool isSelecting = false;
   @override
   void dispose() {
     for (var controller in _videoControllers.values) {
@@ -68,22 +72,41 @@ class _ChatScreenState extends State<ChatScreen> {
   @override
   void initState() {
     super.initState();
+    messages = []; // fetch from your backend or socket
+    filteredMessages = List.from(messages);
     print('🔵 ChatScreen initState for user: ${widget.currentUser}');
+
     final roomId = widget.currentUser.compareTo(widget.otherUser) < 0
         ? '${widget.currentUser}_${widget.otherUser}'
         : '${widget.otherUser}_${widget.currentUser}';
+
     socketService.connect(userId: widget.currentUser).then((_) {
       print('Socket connected: ${socketService.socket.connected}');
       print('Joining room: $roomId');
-      _connectToSocket();
+      socketService.socket.emit('join_room', roomId);
+
+      // 🧹 Listen for delete events
+      socketService.socket.on('message_deleted', (data) {
+        final deletedId = data['messageId'] as String?;
+        if (deletedId != null) {
+          setState(() {
+            messages.removeWhere((msg) => msg.id == deletedId);
+            selectedMessageIds.remove(deletedId);
+            if (selectedMessageIds.isEmpty) isSelecting = false;
+          });
+          print('🗑️ Message deleted via socket: $deletedId');
+        }
+      });
     });
+
     fetchMessages();
+
     _focusNode.addListener(() {
       if (_focusNode.hasFocus) {
         setState(() {
           _showEmojiPicker = false;
         });
-        _markMessagesAsRead(); // <== ADD THIS LINE
+        _markMessagesAsRead(); // ✅ Mark as read when input gets focus
       }
     });
 
@@ -172,6 +195,21 @@ class _ChatScreenState extends State<ChatScreen> {
       });
     });
 
+    socketService.socket.on('new_message', (data) {
+      final newMsg =
+          models.Message.fromJson(data); // adapt to your Message.fromJson
+      if ((newMsg.sender == widget.otherUser &&
+              newMsg.receiver == widget.currentUser) ||
+          (newMsg.sender == widget.currentUser &&
+              newMsg.receiver == widget.otherUser)) {
+        setState(() {
+          messages.add(newMsg);
+          filteredMessages.add(newMsg); // update filtered as well
+        });
+        _scrollToBottomSmooth();
+      }
+    });
+
     socketService.socket.on('missed_call', (data) {
       final newMsg = models.Message.fromJson(data);
       setState(() {
@@ -220,7 +258,9 @@ class _ChatScreenState extends State<ChatScreen> {
 
   Future<void> fetchMessages() async {
     final url = Uri.parse(
-        'http://192.168.137.145:4000/messages?user1=${widget.currentUser}&user2=${widget.otherUser}&currentUser=${widget.currentUser}');
+      'http://10.202.42.143:4000/messages?user1=${widget.currentUser}&user2=${widget.otherUser}&currentUser=${widget.currentUser}',
+    );
+
     try {
       final response = await http.get(url);
       print('FetchMessages response status: ${response.statusCode}');
@@ -228,13 +268,16 @@ class _ChatScreenState extends State<ChatScreen> {
 
       if (response.statusCode == 200) {
         final List<dynamic> data = jsonDecode(response.body);
-        print('Parsed messages count: ${data.length}');
+        print('Parsed messages count (raw): ${data.length}');
+
+        final filtered = data.where((json) => json['deleted'] != true).toList();
+        print('Messages after filtering deleted: ${filtered.length}');
 
         setState(() {
-          messages = data.map((json) {
-            print('Parsing message: $json');
+          messages = filtered.map((json) {
+            print('✅ Parsing message: $json');
             return models.Message(
-              id: json['_id'] ?? '',
+              id: json['id'] ?? '',
               sender: json['sender'] ?? 'Unknown',
               receiver: json['receiver'] ?? 'Unknown',
               content: json['content'] ?? '[No Content]',
@@ -243,8 +286,8 @@ class _ChatScreenState extends State<ChatScreen> {
               emojis: (json['emojis'] as List<dynamic>?)?.cast<String>() ?? [],
               fileUrl: json['fileUrl'] ?? '',
               isFile: json['isFile'] ??
-                  json['fileUrl'] != null &&
-                      json['fileUrl'].toString().isNotEmpty,
+                  (json['fileUrl'] != null &&
+                      json['fileUrl'].toString().isNotEmpty),
               deleted: json['deleted'] ?? false,
               edited: json['edited'] ?? false,
               readBy: (json['readBy'] as List<dynamic>?)?.cast<String>() ?? [],
@@ -263,12 +306,35 @@ class _ChatScreenState extends State<ChatScreen> {
           _scrollToBottomSmooth();
         });
       } else {
-        print('Failed to fetch messages: ${response.statusCode}');
+        print('❌ Failed to fetch messages: ${response.statusCode}');
       }
     } catch (error) {
-      print('Error fetching messages: $error');
+      print('❌ Error fetching messages: $error');
     }
   }
+void _onMessageLongPress(int index) {
+  setState(() {
+    isSelecting = true;
+    selectedMessageIndices.add(index);
+  });
+}
+void _onMessageTap(int index) {
+  if (isSelecting) {
+    setState(() {
+      if (selectedMessageIndices.contains(index)) {
+        selectedMessageIndices.remove(index);
+        if (selectedMessageIndices.isEmpty) {
+          isSelecting = false;
+        }
+      } else {
+        selectedMessageIndices.add(index);
+      }
+    });
+  } else {
+    // Your normal tap action (like open message, reply, etc)
+  }
+}
+
 
   Future<void> _markMessagesAsRead() async {
     print('📤 Emitting mark_as_read for ${widget.currentUser}');
@@ -293,8 +359,8 @@ class _ChatScreenState extends State<ChatScreen> {
 
     final message = {
       'roomId': roomId,
-      'sender': widget.currentUser, // <-- must be username
-      'receiver': widget.otherUser, // <-- must be username
+      'sender': widget.currentUser,
+      'receiver': widget.otherUser,
       'content': content,
       'timestamp': DateTime.now().toIso8601String(),
       'isGroup': false,
@@ -302,19 +368,40 @@ class _ChatScreenState extends State<ChatScreen> {
       'fileUrl': fileUrl,
     };
 
-    socketService.sendMessage(message);
+    // ✅ Locally show message immediately
+    final localMessage = models.Message(
+      id: UniqueKey().toString(), // temporary unique id
+      sender: widget.currentUser,
+      receiver: widget.otherUser,
+      content: content,
+      timestamp: DateTime.now().toIso8601String(),
+      isGroup: false,
+      emojis: [],
+      fileUrl: fileUrl,
+      readBy: [widget.currentUser],
+      deleted: false,
+      edited: false,
+    );
+
+    setState(() {
+      messages.add(localMessage); // ✅ Add to UI immediately
+    });
+
+    socketService.sendMessage(message); // 📤 Send to server
     _controller.clear();
     _scrollToBottomSmooth();
   }
 
   void _scrollToBottomSmooth() {
-    if (_scrollController.hasClients) {
-      _scrollController.animateTo(
-        _scrollController.position.maxScrollExtent,
-        duration: const Duration(milliseconds: 300),
-        curve: Curves.easeOut,
-      );
-    }
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (_scrollController.hasClients) {
+        _scrollController.animateTo(
+          _scrollController.position.maxScrollExtent,
+          duration: const Duration(milliseconds: 300),
+          curve: Curves.easeOut,
+        );
+      }
+    });
   }
 
   bool _isImageUrl(String url) {
@@ -327,218 +414,216 @@ class _ChatScreenState extends State<ChatScreen> {
         lower.endsWith('.webp');
   }
 
-Widget _buildMessageContent(models.Message msg) {
-  // --- Missed Call ---
-    print('📩 Building message: content="${msg.content}", fileUrl="${msg.fileUrl}", type="${msg.type}"');
+  Widget _buildMessageContent(models.Message msg) {
+    // --- Missed Call ---
+    print(
+        '📩 Building message: content="${msg.content}", fileUrl="${msg.fileUrl}", type="${msg.type}"');
 
-  if (msg.type == 'missed_call' && msg.receiver == widget.currentUser) {
-    return Row(
-      mainAxisAlignment: MainAxisAlignment.center,
-      children: const [
-        Icon(Icons.call_missed, color: Colors.red),
-        SizedBox(width: 8),
-        Text(
-          'Missed call',
-          style: TextStyle(color: Colors.red, fontStyle: FontStyle.italic),
-        ),
-      ],
-    );
-  }
-
-  // --- Cancelled Call ---
-  if (msg.type == 'cancelled_call' && msg.sender == widget.currentUser) {
-    return Row(
-      mainAxisAlignment: MainAxisAlignment.center,
-      children: const [
-        Icon(Icons.call_end, color: Colors.orange),
-        SizedBox(width: 8),
-        Text(
-          'Cancelled call',
-          style: TextStyle(color: Colors.orange, fontStyle: FontStyle.italic),
-        ),
-      ],
-    );
-  }
-
-  // --- Call Log ---
-  if (msg.type == 'call_log') {
-    String directionText = '';
-    IconData icon;
-    Color color;
-
-    if (msg.direction == 'outgoing' && msg.sender == widget.currentUser) {
-      directionText = 'Outgoing call';
-      icon = Icons.call_made;
-      color = Colors.green;
-    } else if (msg.direction == 'incoming' && msg.receiver == widget.currentUser) {
-      directionText = 'Incoming call';
-      icon = Icons.call_received;
-      color = Colors.blue;
-    } else {
-      return const SizedBox.shrink();
+    if (msg.type == 'missed_call' && msg.receiver == widget.currentUser) {
+      return Row(
+        mainAxisAlignment: MainAxisAlignment.center,
+        children: const [
+          Icon(Icons.call_missed, color: Colors.red),
+          SizedBox(width: 8),
+          Text(
+            'Missed call',
+            style: TextStyle(color: Colors.red, fontStyle: FontStyle.italic),
+          ),
+        ],
+      );
     }
 
-    String durationStr = _formatDuration(msg.duration ?? 0);
-    return Row(
-      mainAxisAlignment: MainAxisAlignment.center,
-      children: [
-        Icon(icon, color: color),
-        const SizedBox(width: 8),
-        Text(
-          '$directionText ($durationStr)',
-          style: TextStyle(color: color, fontStyle: FontStyle.italic),
-        ),
-      ],
-    );
-  }
+    // --- Cancelled Call ---
+    if (msg.type == 'cancelled_call' && msg.sender == widget.currentUser) {
+      return Row(
+        mainAxisAlignment: MainAxisAlignment.center,
+        children: const [
+          Icon(Icons.call_end, color: Colors.orange),
+          SizedBox(width: 8),
+          Text(
+            'Cancelled call',
+            style: TextStyle(color: Colors.orange, fontStyle: FontStyle.italic),
+          ),
+        ],
+      );
+    }
 
-  // --- Handle File or Text or Both ---
-final bool hasFile = msg.fileUrl != null && msg.fileUrl.trim().isNotEmpty;
-  final bool hasText = msg.content.trim().isNotEmpty;
+    // --- Call Log ---
+    if (msg.type == 'call_log') {
+      String directionText = '';
+      IconData icon;
+      Color color;
 
-  List<Widget> children = [];
+      if (msg.direction == 'outgoing' && msg.sender == widget.currentUser) {
+        directionText = 'Outgoing call';
+        icon = Icons.call_made;
+        color = Colors.green;
+      } else if (msg.direction == 'incoming' &&
+          msg.receiver == widget.currentUser) {
+        directionText = 'Incoming call';
+        icon = Icons.call_received;
+        color = Colors.blue;
+      } else {
+        return const SizedBox.shrink();
+      }
 
-  if (hasFile) {
-    final ext = getFileExtension(msg.fileUrl);
-    final isRemote = _isRemoteFile(msg.fileUrl);
+      String durationStr = _formatDuration(msg.duration ?? 0);
+      return Row(
+        mainAxisAlignment: MainAxisAlignment.center,
+        children: [
+          Icon(icon, color: color),
+          const SizedBox(width: 8),
+          Text(
+            '$directionText ($durationStr)',
+            style: TextStyle(color: color, fontStyle: FontStyle.italic),
+          ),
+        ],
+      );
+    }
 
-    Widget fileWidget;
+    // --- Handle File or Text or Both ---
+    final bool hasFile = msg.fileUrl != null && msg.fileUrl.trim().isNotEmpty;
+    final bool hasText = msg.content.trim().isNotEmpty;
 
-    if (['.jpg', '.jpeg', '.png', '.gif', '.bmp', '.webp'].contains(ext)) {
-      fileWidget = ClipRRect(
-        borderRadius: BorderRadius.circular(8),
-        child: isRemote
-            ? Image.network(
-                msg.fileUrl,
-                width: 150,
-                height: 150,
-                fit: BoxFit.cover,
-                loadingBuilder: (context, child, progress) {
-                  if (progress == null) return child;
-                  return SizedBox(
-                    width: 150,
-                    height: 150,
-                    child: Center(
-                      child: CircularProgressIndicator(
-                        value: progress.expectedTotalBytes != null
-                            ? progress.cumulativeBytesLoaded / progress.expectedTotalBytes!
-                            : null,
+    List<Widget> children = [];
+
+    if (hasFile) {
+      final ext = getFileExtension(msg.fileUrl);
+      final isRemote = _isRemoteFile(msg.fileUrl);
+
+      Widget fileWidget;
+
+      if (['.jpg', '.jpeg', '.png', '.gif', '.bmp', '.webp'].contains(ext)) {
+        fileWidget = ClipRRect(
+          borderRadius: BorderRadius.circular(8),
+          child: isRemote
+              ? Image.network(
+                  msg.fileUrl,
+                  width: 150,
+                  height: 150,
+                  fit: BoxFit.cover,
+                  loadingBuilder: (context, child, progress) {
+                    if (progress == null) return child;
+                    return SizedBox(
+                      width: 150,
+                      height: 150,
+                      child: Center(
+                        child: CircularProgressIndicator(
+                          value: progress.expectedTotalBytes != null
+                              ? progress.cumulativeBytesLoaded /
+                                  progress.expectedTotalBytes!
+                              : null,
+                        ),
                       ),
-                    ),
-                  );
-                },
-                errorBuilder: (context, error, stackTrace) =>
-                    const Text('[Image not available]'),
-              )
-            : Image.file(
-                File(msg.fileUrl),
-                width: 150,
-                height: 150,
-                fit: BoxFit.cover,
-                errorBuilder: (context, error, stackTrace) =>
-                    const Text('[Image file not found]'),
-              ),
-      );
-    }
-
-    else if (['.mp4', '.webm', '.mov', '.mkv'].contains(ext)) {
-      fileWidget = Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          SizedBox(
-            width: 200,
-            height: 150,
-            child: InlineVideoPlayer(videoUrl: msg.fileUrl),
-          ),
-          TextButton.icon(
-            icon: const Icon(Icons.download),
-            label: const Text("Save Video"),
-            onPressed: () async {
-              final savedPath = await saveFileSmart(
-                msg.fileUrl,
-                'chat_video_${DateTime.now().millisecondsSinceEpoch}$ext',
-              );
-              ScaffoldMessenger.of(context).showSnackBar(
-                SnackBar(
-                    content: Text(savedPath != null
-                        ? 'Video saved to $savedPath'
-                        : 'Save failed')),
-              );
-            },
-          ),
-        ],
-      );
-    }
-
-    else if (['.mp3', '.wav', '.aac', '.m4a'].contains(ext)) {
-      fileWidget = Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          InlineAudioPlayer(audioUrl: msg.fileUrl),
-          TextButton.icon(
-            icon: const Icon(Icons.download),
-            label: const Text("Save Audio"),
-            onPressed: () async {
-              final savedPath = await saveFileSmart(
-                msg.fileUrl,
-                'chat_audio_${DateTime.now().millisecondsSinceEpoch}$ext',
-              );
-              ScaffoldMessenger.of(context).showSnackBar(
-                SnackBar(
-                    content: Text(savedPath != null
-                        ? 'Audio saved to $savedPath'
-                        : 'Save failed')),
-              );
-            },
-          ),
-        ],
-      );
-    }
-
-    else {
-      fileWidget = InkWell(
-        onTap: () async {
-          final savedPath = await saveFileSmart(
-            msg.fileUrl,
-            'chat_file_${DateTime.now().millisecondsSinceEpoch}$ext',
-          );
-          ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(
-                content: Text(savedPath != null
-                    ? 'File saved to $savedPath'
-                    : 'Save failed')),
-          );
-        },
-        child: Row(
-          children: const [
-            Icon(Icons.insert_drive_file, color: Colors.blue),
-            SizedBox(width: 8),
-            Text('Download file', style: TextStyle(color: Colors.blue)),
+                    );
+                  },
+                  errorBuilder: (context, error, stackTrace) =>
+                      const Text('[Image not available]'),
+                )
+              : Image.file(
+                  File(msg.fileUrl),
+                  width: 150,
+                  height: 150,
+                  fit: BoxFit.cover,
+                  errorBuilder: (context, error, stackTrace) =>
+                      const Text('[Image file not found]'),
+                ),
+        );
+      } else if (['.mp4', '.webm', '.mov', '.mkv'].contains(ext)) {
+        fileWidget = Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            SizedBox(
+              width: 200,
+              height: 150,
+              child: InlineVideoPlayer(videoUrl: msg.fileUrl),
+            ),
+            TextButton.icon(
+              icon: const Icon(Icons.download),
+              label: const Text("Save Video"),
+              onPressed: () async {
+                final savedPath = await saveFileSmart(
+                  msg.fileUrl,
+                  'chat_video_${DateTime.now().millisecondsSinceEpoch}$ext',
+                );
+                ScaffoldMessenger.of(context).showSnackBar(
+                  SnackBar(
+                      content: Text(savedPath != null
+                          ? 'Video saved to $savedPath'
+                          : 'Save failed')),
+                );
+              },
+            ),
           ],
+        );
+      } else if (['.mp3', '.wav', '.aac', '.m4a'].contains(ext)) {
+        fileWidget = Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            InlineAudioPlayer(audioUrl: msg.fileUrl),
+            TextButton.icon(
+              icon: const Icon(Icons.download),
+              label: const Text("Save Audio"),
+              onPressed: () async {
+                final savedPath = await saveFileSmart(
+                  msg.fileUrl,
+                  'chat_audio_${DateTime.now().millisecondsSinceEpoch}$ext',
+                );
+                ScaffoldMessenger.of(context).showSnackBar(
+                  SnackBar(
+                      content: Text(savedPath != null
+                          ? 'Audio saved to $savedPath'
+                          : 'Save failed')),
+                );
+              },
+            ),
+          ],
+        );
+      } else {
+        fileWidget = InkWell(
+          onTap: () async {
+            final savedPath = await saveFileSmart(
+              msg.fileUrl,
+              'chat_file_${DateTime.now().millisecondsSinceEpoch}$ext',
+            );
+            ScaffoldMessenger.of(context).showSnackBar(
+              SnackBar(
+                  content: Text(savedPath != null
+                      ? 'File saved to $savedPath'
+                      : 'Save failed')),
+            );
+          },
+          child: Row(
+            children: const [
+              Icon(Icons.insert_drive_file, color: Colors.blue),
+              SizedBox(width: 8),
+              Text('Download file', style: TextStyle(color: Colors.blue)),
+            ],
+          ),
+        );
+      }
+
+      children.add(fileWidget);
+    }
+
+    if (hasText) {
+      if (children.isNotEmpty) {
+        children.add(const SizedBox(height: 8));
+      }
+      children.add(
+        Text(
+          msg.content.trim(),
+          style: const TextStyle(color: Colors.black87, fontSize: 16),
         ),
       );
     }
 
-    children.add(fileWidget);
-  }
-
-  if (hasText) {
-    if (children.isNotEmpty) {
-      children.add(const SizedBox(height: 8));
-    }
-    children.add(
-      Text(
-        msg.content.trim(),
-        style: const TextStyle(color: Colors.black87, fontSize: 16),
-      ),
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: children,
     );
   }
 
-  return Column(
-    crossAxisAlignment: CrossAxisAlignment.start,
-    children: children,
-  );
-}
 // Call button handlers
   String getFileExtension(String urlOrName) {
     try {
@@ -739,7 +824,7 @@ final bool hasFile = msg.fileUrl != null && msg.fileUrl.trim().isNotEmpty;
     try {
       final request = http.MultipartRequest(
         'POST',
-        Uri.parse('http://192.168.137.145:4000/upload'),
+        Uri.parse('http://10.202.42.143:4000/upload'),
       );
 
       if (kIsWeb && file.bytes != null) {
@@ -784,11 +869,15 @@ final bool hasFile = msg.fileUrl != null && msg.fileUrl.trim().isNotEmpty;
   }
 
   @override
-  Widget build(BuildContext context) {
-      print('All messages: ${messages.map((m) => '${m.content} | ${m.fileUrl}').toList()}');
+  Set<int> selectedMessageIndices = {};
 
-    List<models.Message> filteredMessages =
-        messages.where((msg) => !msg.deleted).toList();
+  @override
+  Widget build(BuildContext context) {
+    print(
+        'All messages: ${messages.map((m) => '${m.content} | ${m.fileUrl}').toList()}');
+
+    // Filter deleted messages (if you still want this)
+    List<models.Message> filteredMessages = messages;
 
     return Scaffold(
         appBar: AppBar(
@@ -802,18 +891,79 @@ final bool hasFile = msg.fileUrl != null && msg.fileUrl.trim().isNotEmpty;
               ),
             ],
           ),
-          actions: [
-            IconButton(
-              icon: const Icon(Icons.call, color: Colors.green),
-              tooltip: 'Voice Call',
-              onPressed: _onVoiceCallPressed,
-            ),
-            IconButton(
-              icon: const Icon(Icons.videocam, color: Colors.blue),
-              tooltip: 'Video Call',
-              onPressed: _onVideoCallPressed,
-            ),
-          ],
+          actions: isSelecting
+              ? [
+                  IconButton(
+                    icon: const Icon(Icons.close),
+                    onPressed: () {
+                      setState(() {
+                        isSelecting = false;
+                        selectedMessageIndices.clear();
+                      });
+                    },
+                  ),
+                 IconButton(
+  icon: const Icon(Icons.delete, color: Colors.red),
+  onPressed: () async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (_) => AlertDialog(
+        title: const Text('Delete Messages?'),
+        content: Text(
+          'Are you sure you want to delete ${selectedMessageIndices.length} message(s)?',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(false),
+            child: const Text('Cancel'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(true),
+            child: const Text('Delete', style: TextStyle(color: Colors.red)),
+          ),
+        ],
+      ),
+    );
+
+    if (confirmed == true) {
+      print('All messages in filteredMessages with IDs:');
+      for (int i = 0; i < filteredMessages.length; i++) {
+        print('Index $i -> id: "${filteredMessages[i].id}" content: "${filteredMessages[i].content}"');
+      }
+
+      final messagesToDelete = selectedMessageIndices
+          .map((i) => filteredMessages[i])
+          .toList();
+
+      for (final message in messagesToDelete) {
+        await _deleteMessage(message);
+      }
+
+      setState(() {
+        selectedMessageIndices.clear();
+        isSelecting = false;
+      });
+
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Selected messages deleted')),
+      );
+    }
+  },
+),
+
+                ]
+              : [
+                  IconButton(
+                    icon: const Icon(Icons.call, color: Colors.green),
+                    tooltip: 'Voice Call',
+                    onPressed: _onVoiceCallPressed,
+                  ),
+                  IconButton(
+                    icon: const Icon(Icons.videocam, color: Colors.blue),
+                    tooltip: 'Video Call',
+                    onPressed: _onVideoCallPressed,
+                  ),
+                ],
         ),
         body: Column(children: [
           Expanded(
@@ -839,66 +989,72 @@ final bool hasFile = msg.fileUrl != null && msg.fileUrl.trim().isNotEmpty;
 
                 return GestureDetector(
                   onLongPress: () {
-                    showDialog(
-                      context: context,
-                      builder: (_) => AlertDialog(
-                        title: const Text('Delete Message?'),
-                        content: const Text(
-                            'Are you sure you want to delete this message?'),
-                        actions: [
-                          TextButton(
-                            onPressed: () => Navigator.of(context).pop(),
-                            child: const Text('Cancel'),
-                          ),
-                          TextButton(
-                            onPressed: () async {
-                              Navigator.of(context).pop();
-                              await _deleteMessage(msg);
-                            },
-                            child: const Text('Delete',
-                                style: TextStyle(color: Colors.red)),
-                          ),
-                        ],
-                      ),
-                    );
+                    setState(() {
+                      isSelecting = true;
+                      selectedMessageIndices = {index};
+                      print('Selected message index: $index');
+                    });
                   },
-                  child: Row(
-                    mainAxisAlignment:
-                        isMe ? MainAxisAlignment.end : MainAxisAlignment.start,
-                    crossAxisAlignment: CrossAxisAlignment.end,
-                    children: [
-                      Container(
-                        margin: const EdgeInsets.symmetric(vertical: 4),
-                        padding: const EdgeInsets.all(12),
-                        constraints: BoxConstraints(
-                          maxWidth: MediaQuery.of(context).size.width * 0.7,
-                        ),
-                        decoration: BoxDecoration(
-                          color: isMe ? Colors.blue[200] : Colors.grey[300],
-                          borderRadius: BorderRadius.only(
-                            topLeft: const Radius.circular(12),
-                            topRight: const Radius.circular(12),
-                            bottomLeft: isMe
-                                ? const Radius.circular(12)
-                                : const Radius.circular(0),
-                            bottomRight: isMe
-                                ? const Radius.circular(0)
-                                : const Radius.circular(12),
+                  onTap: () {
+                    if (!isSelecting) return;
+                    setState(() {
+                      if (selectedMessageIndices.contains(index)) {
+                        selectedMessageIndices.remove(index);
+                        if (selectedMessageIndices.isEmpty) {
+                          isSelecting = false;
+                        }
+                      } else {
+                        selectedMessageIndices.add(index);
+                      }
+                      print(
+                          'Tapped message index: $index, selected indices: $selectedMessageIndices');
+                    });
+                  },
+                  child: Container(
+                    color: selectedMessageIndices.contains(index)
+                        ? Colors.blue.withOpacity(0.2)
+                        : Colors.transparent,
+                    child: Row(
+                      mainAxisAlignment: isMe
+                          ? MainAxisAlignment.end
+                          : MainAxisAlignment.start,
+                      crossAxisAlignment: CrossAxisAlignment.end,
+                      children: [
+                        Container(
+                          margin: const EdgeInsets.symmetric(vertical: 4),
+                          padding: const EdgeInsets.all(12),
+                          constraints: BoxConstraints(
+                            maxWidth: MediaQuery.of(context).size.width * 0.7,
+                          ),
+                          decoration: BoxDecoration(
+                            color: selectedMessageIndices.contains(index)
+                                ? Colors.lightBlueAccent.withOpacity(0.5)
+                                : (isMe ? Colors.blue[200] : Colors.grey[300]),
+                            borderRadius: BorderRadius.only(
+                              topLeft: const Radius.circular(12),
+                              topRight: const Radius.circular(12),
+                              bottomLeft: isMe
+                                  ? const Radius.circular(12)
+                                  : const Radius.circular(0),
+                              bottomRight: isMe
+                                  ? const Radius.circular(0)
+                                  : const Radius.circular(12),
+                            ),
+                          ),
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.end,
+                            children: [
+                              _buildMessageContent(msg),
+                              if (isMe)
+                                Padding(
+                                  padding: const EdgeInsets.only(top: 4),
+                                  child: readStatusIcon(),
+                                ),
+                            ],
                           ),
                         ),
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.end,
-                          children: [
-                            _buildMessageContent(msg),
-                            if (isMe)
-                              Padding(
-                                padding: const EdgeInsets.only(top: 4),
-                                child: readStatusIcon(),
-                              ),
-                          ],
-                        ),
-                      ),
-                    ],
+                      ],
+                    ),
                   ),
                 );
               },
@@ -998,7 +1154,7 @@ final bool hasFile = msg.fileUrl != null && msg.fileUrl.trim().isNotEmpty;
   Future<String?> _uploadFile(PlatformFile file) async {
     final request = http.MultipartRequest(
       'POST',
-      Uri.parse('http://192.168.137.145:4000/upload'),
+      Uri.parse('http://10.202.42.143:4000/upload'),
     );
 
     if (kIsWeb && file.bytes != null) {
@@ -1020,30 +1176,89 @@ final bool hasFile = msg.fileUrl != null && msg.fileUrl.trim().isNotEmpty;
     }
   }
 
+  Future<void> deleteSelectedMessages() async {
+    print('🚀 deleteSelectedMessages() called');
+
+    if (selectedMessageIds.isEmpty) {
+      print('⚠️ No message IDs selected to delete');
+      return;
+    }
+
+    print('🛰️ Deleting selected message IDs: $selectedMessageIds');
+
+    for (final msgId in selectedMessageIds) {
+      if (msgId.isEmpty ||
+          msgId.length != 24 ||
+          !RegExp(r'^[a-f\d]{24}$').hasMatch(msgId)) {
+        print('❌ Skipping invalid message ID: "$msgId"');
+        continue;
+      }
+
+      final url = Uri.parse('http://10.202.42.143:4000/messages/$msgId');
+      print('📡 DELETE request to: $url');
+
+      try {
+        print('📡 ABOUT TO SEND DELETE → $url');
+
+        final response = await http.delete(url);
+        print('🔽 Response ${response.statusCode} — ${response.body}');
+        if (response.statusCode == 200) {
+          print('✅ Deleted message $msgId');
+        } else {
+          print('❌ Failed to delete message $msgId');
+        }
+      } catch (e) {
+        print('🔥 Exception while deleting $msgId: $e');
+      }
+    }
+
+    setState(() {
+      messages.removeWhere((m) => selectedMessageIds.contains(m.id));
+      selectedMessageIds.clear();
+      isSelecting = false;
+    });
+
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(content: Text('Selected messages deleted')),
+    );
+  }
+
   Future<void> _deleteMessage(models.Message message) async {
-    final url = Uri.parse('http://192.168.137.145:4000/messages/${message.id}');
+    final messageId = message.id;
+    print('🧾 Message ID to delete: "$messageId"');
+    print('🚀 deleteSelectedMessages() called');
+
+    if (messageId.isEmpty ||
+        messageId.length != 24 ||
+        !RegExp(r'^[a-f\d]{24}$').hasMatch(messageId)) {
+      print('❌ Invalid message ID format: "$messageId"');
+      return;
+    }
+
+    final url = Uri.parse('http://10.202.42.143:4000/messages/$messageId');
+    print('📡 Sending DELETE to: $url');
+
     try {
-      final response = await http.delete(url, headers: {
-        'Authorization': 'Bearer ${widget.jwtToken}',
-      });
+      print('📡 ABOUT TO SEND DELETE → $url');
+
+      final response = await http.delete(url);
+
+      print('🔽 Status code: ${response.statusCode}');
+      print('📨 Response body: ${response.body}');
 
       if (response.statusCode == 200) {
         setState(() {
-          messages.removeWhere((m) => m.id == message.id);
+          messages.removeWhere((m) => m.id == messageId);
         });
+        print('✅ Message $messageId removed from UI');
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(content: Text('Message deleted')),
         );
       } else {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Failed to delete: ${response.statusCode}')),
-        );
+        print('❌ Delete failed: ${response.statusCode}');
       }
     } catch (e) {
-      print('Delete error: $e');
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Error deleting message: $e')),
-      );
+      print('🔥 DELETE request failed: $e');
     }
   }
 

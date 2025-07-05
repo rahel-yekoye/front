@@ -30,7 +30,7 @@ class _VerificationScreenState extends State<VerificationScreen> {
 
     try {
       final response = await http.post(
-        Uri.parse('http://192.168.137.145:4000/verify'),
+        Uri.parse('http://10.202.42.143:4000/verify'),
         headers: {'Content-Type': 'application/json'},
         body: jsonEncode({
           'email': widget.email,
